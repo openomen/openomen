@@ -1,8 +1,23 @@
 # OpenOMEN Hub
 Unofficial driver and daemon for HP OMEN hardware on Linux.
 
+## Supported devices
+The list below contains latest tested and supported devices on the stable channel. These devices below are supported by OpenOMEN and the Hub app, and have no breaking issues so far.
 
-# Disclaimer
+| Devices     | Version | Notes                                   |
+|------------------|---------|-----------------------------------------|
+| Victus 15 15-fb0xxx | ✅ | Confirmed working and supported since v1.0       |
+
+## Support & Feedback
+For support, feature requests, or to report bugs, please open an issue on the GitHub repository.
+
+## Installation
+Official packages are available for these distributions (and their derivatives):
+
+- [Ubuntu](releases/) **(In the works)**
+
+
+## Disclaimer
 
 OpenOmen is an independent open-source project and is **not affiliated with, endorsed by, or sponsored by HP Inc.** or the Omen brand.
 
