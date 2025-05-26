@@ -14,7 +14,7 @@ For support, feature requests, or to report bugs, please open an issue on the Gi
 ## Installation
 Official packages are available for these distributions (and their derivatives):
 
-- [Ubuntu](releases/) **(In the works)**
+- [Ubuntu](https://github.com/openomen/openomen/releases) **(In the works)**
 
 
 ## Disclaimer
