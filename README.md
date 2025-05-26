@@ -6,7 +6,7 @@ The list below contains latest tested and supported devices on the stable channe
 
 | Devices     | Version | Notes                                   |
 |------------------|---------|-----------------------------------------|
-| Victus 15 15-fb0xxx | ✅ | Confirmed working and supported since v1.0       |
+| Victus 15 15-fb0xxx | ✅ | Confirmed working and supported since v0.1       |
 
 ## Support & Feedback
 For support, feature requests, or to report bugs, please open an issue on the GitHub repository.
