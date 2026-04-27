@@ -7,7 +7,8 @@ The list below contains latest tested and supported devices on the stable channe
 | Devices     | Version | Notes                                   |
 |------------------|---------|-----------------------------------------|
 | Victus 15 15-fb0xxx | ✅ | Confirmed working and supported since v0.1       |
-| HP Open X 2S | ✅ | Confirmed working and supported since v0.3       |
+| HP OMEN X 2S | ✅ | Confirmed working and supported since v0.1       |
+| HP OMEN 16 | ✅ | Confirmed working and supported since v0.1       |
 
 ## Support & Feedback
 For support, feature requests, or to report bugs, please open an issue on the GitHub repository.
