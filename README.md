@@ -51,6 +51,7 @@ Most HP OMEN / Victus laptops should work with this tools due to them having ver
 
 ## Supported Linux Distributions
 OpenOMEN has been tested on up to **Linux 7.0** on these Distributions:
+* Arch (7.0.10-arch1-1)
 * Ubuntu (22.04 / 24.04)
 * CachyOS
 
