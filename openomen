@@ -1,0 +1,1636 @@
+#!/usr/bin/env python3
+"""
+OpenOMEN - CLI tool for controlling fan and RGB behavior on HP OMEN/Victus laptops
+audixdev - (C) Copyright 2026 - GPL-3.0 License
+
+“OMEN” and "Victus" are trademarks of HP Inc., and any references to it in this project are strictly for the purpose of device compatibility and identification.
+This software is provided "as is", without warranty of any kind, express or implied. By using this software, you acknowledge that:
+- You are responsible for any potential damage to your device.
+- You understand that modifying hardware or system behavior may void warranties.
+- You will not hold the authors or contributors liable for any outcome resulting from the use of this software.
+Use this software at your own risk.
+
+This program falls under the GNU General Public License v3.0.
+For more details, see <https://www.gnu.org/licenses/gpl-3.0.en.html> or read the LICENSE file included with this software.
+"""
+
+import argparse
+import os
+import sys
+import glob
+import subprocess
+import time
+import json
+import urllib.request
+import urllib.error
+import tempfile
+import re
+import io
+import contextlib
+import shutil
+import ssl
+
+VERSION = "0.4.1"
+APP_NAME = "OpenOMEN CLI"
+
+CLEAR_SCREEN = "\033[2J\033[H"
+HIDE_CURSOR = "\033[?25l"
+SHOW_CURSOR = "\033[?25h"
+
+def find_hwmon_path():
+    """ Dynamically resolve the hwmon path for hp-wmi """
+
+    base_path = "/sys/devices/platform/hp-wmi/hwmon"
+
+    # Find all hwmon* directories
+    hwmon_dirs = glob.glob(f"{base_path}/hwmon*")
+
+    # Look for pwm1_enable in each hwmon directory
+    if not hwmon_dirs:
+        return None
+    for hwmon_dir in hwmon_dirs:
+        pwm_enable_path = os.path.join(hwmon_dir, "pwm1_enable")
+        if os.path.exists(pwm_enable_path):
+            return hwmon_dir
+    return None
+
+
+def read_fan_rpm():
+    """
+    Read fan RPM values from the hwmon path
+    Reads fan1_input and fan2_input if they exist.
+    """
+    hwmon_path = find_hwmon_path()
+    if not hwmon_path:
+        return {}
+    
+    fan_rpm = {}
+
+    # Read fan1_input if it exists
+    fan1_path = os.path.join(hwmon_path, "fan1_input")
+    if os.path.exists(fan1_path):
+        try:
+            with open(fan1_path, 'r') as f:
+                fan_rpm["fan1"] = int(f.read().strip())
+        except (IOError, ValueError):
+            pass
+
+    # Read fan2_input if it exists
+    fan2_path = os.path.join(hwmon_path, "fan2_input")
+    if os.path.exists(fan2_path):
+        try:
+            with open(fan2_path, 'r') as f:
+                fan_rpm["fan2"] = int(f.read().strip())
+        except (IOError, ValueError):
+            pass
+    return fan_rpm
+
+
+def read_fan_status():
+    """ this just display current fan status and RPM information """
+
+    # Get fan status
+    fan_status = read_fan_boost_status()
+    if fan_status == "0":
+        print("Fan Status:       Max (Manual control)")
+    elif fan_status == "2":
+        print("Fan Status:       Auto (BIOS control)")
+    else:
+        print("Fan Status:       Unknown")
+    
+    # Get fan RPM
+    fan_rpm = read_fan_rpm()
+    if "fan1" in fan_rpm:
+        print(f"Fan 1 RPM:        {fan_rpm['fan1']} RPM")
+    if "fan2" in fan_rpm:
+        print(f"Fan 2 RPM:        {fan_rpm['fan2']} RPM")
+    return fan_status is not None
+
+
+def check_root():
+    return os.geteuid() == 0
+
+def ensure_root():
+    if not check_root():
+        import sys
+        # PyInstaller sets sys.executable to the actual binary path
+        script_path = sys.executable if getattr(sys, 'frozen', False) else os.path.abspath(sys.argv[0])
+        args = ['sudo', script_path] + sys.argv[1:]
+        os.execvp('sudo', args)
+
+def read_fan_boost_status():
+    """ reads it from pwm1_enable file earlier """
+
+    hwmon_path = find_hwmon_path()
+    if not hwmon_path:
+        return None
+    pwm_enable_path = os.path.join(hwmon_path, "pwm1_enable")
+    try:
+        with open(pwm_enable_path, 'r') as f:
+            return f.read().strip()
+    except IOError as e:
+        print(f"Error: Failed to read pwm1_enable: {e}", file=sys.stderr)
+        return None
+
+
+def set_fan_boost_mode(mode):
+    """ Set fan control mode to either enabled or disabled """
+    ensure_root()
+    hwmon_path = find_hwmon_path()
+    if not hwmon_path:
+        print("Error: Could not find hp-wmi hwmon device.", file=sys.stderr)
+        print("Make sure the hp-wmi kernel module is loaded.", file=sys.stderr)
+        return False
+    
+    pwm_enable_path = os.path.join(hwmon_path, "pwm1_enable")
+    
+    try:
+        with open(pwm_enable_path, 'w') as f:
+            if mode == 'enable':
+                f.write('0')
+                expected_value = '0'
+                print("Max RPM mode enabled, your fan(s) will now run at max RPM speeds.")
+            elif mode == 'disable':
+                f.write('2')
+                expected_value = '2'
+                print("Auto mode enabled, your fan(s) will now run at automatic speeds and are controlled by the BIOS again.")
+            else:
+                print("Error: Invalid mode. Use 'enable' or 'disable'.", file=sys.stderr)
+                return False
+        
+        # Verify the write actually stuck by reading back the value
+        time.sleep(0.1)  # Small delay for sanity check!!
+        actual_value = read_fan_boost_status()
+        
+        if actual_value != expected_value:
+            print(f"Error: pwm1_enable write failed to stick!", file=sys.stderr)
+            print(f"Expected: {expected_value}, Actual: {actual_value}", file=sys.stderr)
+            print("This may indicate a hardware/firmware issue or blocked access.", file=sys.stderr)
+            print("Try checking if any other daemon is managing fan control.", file=sys.stderr)
+            return False
+        
+        return True
+    except PermissionError:
+        print("Error: Permission denied writing to pwm1_enable.", file=sys.stderr)
+        print("Make sure you're running with sudo.", file=sys.stderr)
+        return False
+    except IOError as e:
+        print(f"Error: Failed to write to pwm1_enable: {e}", file=sys.stderr)
+        return False
+
+
+def toggle_fan_boost():
+    """ Toggle fan control between enabled and disabled states. """
+    current_status = read_fan_boost_status()
+    if current_status is None:
+        print("Error: Could not read current fan control status.", file=sys.stderr)
+        return False
+    
+    if current_status == "2":
+        # Currently disabled, enable it
+        return set_fan_boost_mode('enable')
+    elif current_status == "0":
+        # Currently enabled, disable it
+        return set_fan_boost_mode('disable')
+    else:
+        print(f"Error: Unknown fan control status: {current_status}", file=sys.stderr)
+        return False
+
+
+def get_friendly_label(label):
+    """ Convert technical hwmon labels to userfriendly names, better for everyone """
+    label_mapping = {
+        'edge': 'CPU',
+        'Tccd1': 'CPU CCD1',
+        'Tccd2': 'CPU CCD2',
+        'Tctl': 'CPU Control',
+        'Tdie': 'CPU Die',
+        'Package id 0': 'CPU Package',
+        'Composite': 'CPU Composite',
+        'temp1': 'System',
+        'temp2': 'CPU',
+        'temp3': 'GPU',
+    }
+    
+    # Return mapped label or original if not found
+    return label_mapping.get(label, label)
+
+
+# Proper temperature reading function
+def read_temperature():
+    """
+    Read temperature from the hwmon device
+    Searches all hwmon devices for temperature sensors,
+    prioritizing CPU temps over RAM and or other sensors
+    """
+    hwmon_base = "/sys/class/hwmon"
+    hwmon_dirs = glob.glob(f"{hwmon_base}/hwmon*")
+    
+    if not hwmon_dirs:
+        print("Error: No hwmon devices found.", file=sys.stderr)
+        return False
+
+    # Driver names associated with CPU temperatures
+    CPU_DRIVER_PRIORITY = [
+        "coretemp",    # Intel per-core temps
+        "k10temp",     # AMD CPU temps
+        "zenpower",    # AMD Zen alternative driver
+        "hp-wmi",      # HP-specific WMI sensors (BIOS/board)
+        "acpitz",      # ACPI thermal zones (fallback)
+    ]
+
+    # Label substrings that strongly indicate CPU/package temps
+    CPU_LABEL_KEYWORDS = [
+        "package", "tctl", "tdie", "core", "cpu", "physical"
+    ]
+
+    # Sensors to explicitly skip
+    SKIP_LABEL_KEYWORDS = [
+        "spd", "dram", "dimm", "ram", "mem", "nvme", "hdd", "ssd", "fan"
+    ]
+
+    def get_hwmon_driver(hwmon_dir):
+        name_path = os.path.join(hwmon_dir, "name")
+        if os.path.exists(name_path):
+            try:
+                with open(name_path, 'r') as f:
+                    return f.read().strip().lower()
+            except IOError:
+                pass
+        return ""
+
+    def read_hwmon_temps(hwmon_dir):
+        """Return list of (label, temp_celsius) from a hwmon dir."""
+        results = []
+        for temp_file in sorted(glob.glob(os.path.join(hwmon_dir, "temp*_input"))):
+            try:
+                with open(temp_file, 'r') as f:
+                    temp_celsius = int(f.read().strip()) / 1000.0
+
+                label_path = temp_file.replace("_input", "_label")
+                raw_label = ""
+                if os.path.exists(label_path):
+                    try:
+                        with open(label_path, 'r') as lf:
+                            raw_label = lf.read().strip().lower()
+                    except IOError:
+                        pass
+
+                results.append((raw_label, temp_celsius))
+            except IOError:
+                continue
+        return results
+
+    # To build a map of driver_name (hwmon_dir, [(label, temp), ...])
+    hwmon_by_driver = {}
+    for hwmon_dir in hwmon_dirs:
+        driver = get_hwmon_driver(hwmon_dir)
+        temps = read_hwmon_temps(hwmon_dir)
+        if temps:
+            hwmon_by_driver.setdefault(driver, []).append((hwmon_dir, temps))
+
+    # Go through drivers in priority order, then fall back to everything else
+    ordered_drivers = CPU_DRIVER_PRIORITY + [
+        d for d in hwmon_by_driver if d not in CPU_DRIVER_PRIORITY
+    ]
+
+    for driver in ordered_drivers:
+        if driver not in hwmon_by_driver:
+            continue
+
+        for hwmon_dir, temps in hwmon_by_driver[driver]:
+            for raw_label, temp_celsius in temps:
+                # Skip known non-CPU sensors
+                if any(kw in raw_label for kw in SKIP_LABEL_KEYWORDS):
+                    continue
+
+                # Within a CPU driver, prefer package/core labels
+                if driver in CPU_DRIVER_PRIORITY[:3]:  # coretemp / k10temp / zenpower
+                    if not any(kw in raw_label for kw in CPU_LABEL_KEYWORDS):
+                        continue  # skip non-package entries on first pass
+
+                friendly_label = get_friendly_label(raw_label) if raw_label else driver
+                label = friendly_label + ": " if friendly_label else ""
+                print(f"{label}Temperature: {temp_celsius:.1f}°C")
+                return True
+
+    # Second pass: relax the label filter for CPU drivers (e.g. unlabelled coretemp entries)
+    for driver in CPU_DRIVER_PRIORITY:
+        if driver not in hwmon_by_driver:
+            continue
+        for hwmon_dir, temps in hwmon_by_driver[driver]:
+            for raw_label, temp_celsius in temps:
+                if any(kw in raw_label for kw in SKIP_LABEL_KEYWORDS):
+                    continue
+                friendly_label = get_friendly_label(raw_label) if raw_label else driver
+                label = friendly_label + ": " if friendly_label else ""
+                print(f"{label}Temperature: {temp_celsius:.1f}°C")
+                return True
+
+    print("Error: No CPU temperature sensor found in any hwmon device.", file=sys.stderr)
+    return False
+
+def read_cpu_stats():
+    """
+    Read CPU temperature, utilization per core and frequency.
+    """
+    cpu_name = "Unknown CPU"
+    try:
+        with open("/proc/cpuinfo", "r") as f:
+            for line in f:
+                if line.startswith("model name"):
+                    cpu_name = line.split(":", 1)[1].strip()
+                    break
+    except IOError:
+        pass
+    print(f"CPU:              {cpu_name}\n")
+
+    # Temperature
+    read_temperature()
+
+    # Per-core usage & frequency
+    try:
+        # Two reads 500ms apart to get a real usage
+        with open("/proc/stat", "r") as f:
+            lines1 = f.readlines()
+        time.sleep(0.5)
+        with open("/proc/stat", "r") as f:
+            lines2 = f.readlines()
+
+        core_lines1 = [l for l in lines1 if l.startswith("cpu") and l[3] != " "]
+        core_lines2 = [l for l in lines2 if l.startswith("cpu") and l[3] != " "]
+
+        freq_paths = sorted(glob.glob(
+            "/sys/devices/system/cpu/cpu*/cpufreq/scaling_cur_freq"
+        ))
+
+        print()  # just an blank line before core table
+        for i, (l1, l2) in enumerate(zip(core_lines1, core_lines2)):
+            vals1 = list(map(int, l1.split()[1:]))
+            vals2 = list(map(int, l2.split()[1:]))
+
+            idle1, total1 = vals1[3], sum(vals1)
+            idle2, total2 = vals2[3], sum(vals2)
+
+            total_delta = total2 - total1
+            idle_delta  = idle2  - idle1
+            usage = 0.0 if total_delta == 0 else (1 - idle_delta / total_delta) * 100
+
+            freq_mhz = ""
+            if i < len(freq_paths):
+                try:
+                    with open(freq_paths[i], "r") as f:
+                        freq_mhz = f"  {int(f.read().strip()) / 1000:.0f} MHz"
+                except IOError:
+                    pass
+
+            bar_len = 20
+            filled  = int(usage / 100 * bar_len)
+            bar     = "█" * filled + "░" * (bar_len - filled)
+            print(f"  Core {i:<2}  [{bar}] {usage:5.1f}%{freq_mhz}")
+
+    except KeyboardInterrupt:
+        print("\nCPU stats reading cancelled by user.")
+        return False
+    except IOError as e:
+        print(f"Error reading CPU stats: {e}", file=sys.stderr)
+        return False
+
+    return True
+
+def read_gpu_stats():
+    """
+    Read GPU temperature, utilization and VRAM from nvidia-smi.
+    Falls back to /sys/class/drm for AMD GPUs
+    """
+    gpu_name = "Unknown GPU"
+    
+    # Try to get GPU name from nvidia-smi first
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            gpu_name = result.stdout.strip()
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    
+    # Try AMD GPU name from /sys/class/drm
+    if gpu_name == "Unknown GPU":
+        try:
+            # Look for AMD GPU card directories
+            amd_card_dirs = glob.glob("/sys/class/drm/card*/device")
+            for card_dir in amd_card_dirs:
+                vendor_file = os.path.join(card_dir, "vendor")
+                if os.path.exists(vendor_file):
+                    with open(vendor_file, 'r') as f:
+                        vendor = f.read().strip()
+                        # AMD vendor ID is 0x1002
+                        if vendor == "0x1002":
+                            # Try to get GPU name from modalias or other files
+                            modalias_file = os.path.join(card_dir, "modalias")
+                            if os.path.exists(modalias_file):
+                                with open(modalias_file, 'r') as f:
+                                    modalias = f.read().strip()
+                                    # Extract GPU info from modalias
+                                    if "pci:v00001002" in modalias:
+                                        # This is an AMD GPU, try to get more specific info
+                                        gpu_name = "AMD GPU"
+                                        break
+        except IOError:
+            pass
+    
+    print(f"GPU:              {gpu_name}\n")
+    
+    # Try NVIDIA for stats
+    try:
+        result = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=temperature.gpu,utilization.gpu,memory.used,memory.total,power.draw",
+                "--format=csv,noheader,nounits"
+            ],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            parts = [p.strip() for p in result.stdout.strip().split(",")]
+            temp, util, vram_used, vram_total, power = parts
+            print(f"GPU Temperature:  {temp}°C")
+            print(f"GPU Utilization:  {util}%")
+            print(f"GPU VRAM:         {vram_used} / {vram_total} MiB")
+            print(f"GPU Power Draw:   {power} W")
+            return True
+    except KeyboardInterrupt:
+        print("\nGPU stats reading cancelled by user.")
+        return False
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
+    # Fallback: AMD via /sys/class/drm
+    amd_temp_paths = glob.glob("/sys/class/drm/card*/device/hwmon/hwmon*/temp1_input")
+    if amd_temp_paths:
+        try:
+            with open(amd_temp_paths[0], 'r') as f:
+                temp = int(f.read().strip()) / 1000.0
+            print(f"GPU Temperature: {temp:.1f}°C")
+            return True
+        except IOError as e:
+            print(f"Error reading AMD GPU temp: {e}", file=sys.stderr)
+        except KeyboardInterrupt:
+            print("\nGPU stats reading cancelled by user.")
+            return False
+
+    print("Error: No GPU found (nvidia-smi unavailable, no AMD hwmon).", file=sys.stderr)
+    return False
+
+def read_all_stats():
+    """
+    Read and display all system stats in a unified dashboard.
+    Shows fan status, power profile, CPU stats, and GPU stats.
+    """
+    print("─── Fan ──────────────────────────")
+    
+    # Get fan status
+    fan_status = read_fan_boost_status()
+    if fan_status == "0":
+        print("Fan Status:       Max (Manual control)")
+    elif fan_status == "2":
+        print("Fan Status:       Auto (BIOS control)")
+    else:
+        print("Fan Status:       Unknown")
+    
+    # Get fan RPM
+    fan_rpm = read_fan_rpm()
+    if "fan1" in fan_rpm:
+        print(f"Fan 1 RPM:        {fan_rpm['fan1']} RPM")
+    if "fan2" in fan_rpm:
+        print(f"Fan 2 RPM:        {fan_rpm['fan2']} RPM")
+    print()
+    
+    print("─── Power ────────────────────────")
+    power_profile = read_power_profile()
+    if power_profile:
+        print(f"Power Profile:    {power_profile}")
+    else:
+        print("Power Profile:    Unknown")
+    print()
+    
+    print("─── CPU ──────────────────────────")
+    read_cpu_stats()
+    print()
+    
+    print("─── GPU ──────────────────────────")
+    read_gpu_stats()
+
+def read_system_info():
+    """
+    Shows system information for debugging and bug reports.
+    Shows needed info like such: CPU, GPU, hwmon drivers, ACPI profiles, hp-wmi status, and kernel version.
+    """
+    print("OpenOMEN System Information")
+    print("=" * 50)
+    
+    print(f"OpenOMEN Version: {VERSION}")
+    print()
+    
+    # Get kernel version
+    try:
+        with open("/proc/version", "r") as f:
+            kernel_version = f.read().strip()
+        print(f"Kernel Version: {kernel_version}")
+    except IOError:
+        print("Kernel Version: Unable to read /proc/version")
+    print()
+    
+    # Get CPU information
+    print("CPU Information:")
+    try:
+        with open("/proc/cpuinfo", "r") as f:
+            for line in f:
+                if line.startswith("model name"):
+                    cpu_model = line.split(":", 1)[1].strip()
+                    print(f"  Model: {cpu_model}")
+                    break
+            else:
+                print("  Model: Unable to detect")
+    except IOError:
+        print("  Model: Unable to read /proc/cpuinfo")
+    
+    # CPU core count
+    try:
+        with open("/proc/cpuinfo", "r") as f:
+            core_count = sum(1 for line in f if line.startswith("processor"))
+        print(f"  Cores: {core_count}")
+    except IOError:
+        print("  Cores: Unable to detect")
+    print()
+    
+    # Get GPU information
+    print("GPU Information:")
+    gpu_detected = False
+    
+    # Try NVIDIA
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name,driver_version", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            nvidia_info = result.stdout.strip().split(",")
+            if len(nvidia_info) >= 2:
+                print(f"  NVIDIA: {nvidia_info[0].strip()}")
+                print(f"  Driver: {nvidia_info[1].strip()}")
+                gpu_detected = True
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    
+    # Try AMD
+    try:
+        amd_card_dirs = glob.glob("/sys/class/drm/card*/device")
+        for card_dir in amd_card_dirs:
+            vendor_file = os.path.join(card_dir, "vendor")
+            if os.path.exists(vendor_file):
+                with open(vendor_file, 'r') as f:
+                    vendor = f.read().strip()
+                    if vendor == "0x1002":  # AMD vendor ID
+                        modalias_file = os.path.join(card_dir, "modalias")
+                        if os.path.exists(modalias_file):
+                            with open(modalias_file, 'r') as f:
+                                modalias = f.read().strip()
+                                if "pci:v00001002" in modalias:
+                                    print("  AMD: GPU detected (PCI device)")
+                                    gpu_detected = True
+                                    break
+    except IOError:
+        pass
+    
+    if not gpu_detected:
+        print("  No supported GPU detected")
+    print()
+    
+    # hwmon drivers
+    print("hwmon Drivers:")
+    hwmon_base = "/sys/class/hwmon"
+    hwmon_dirs = glob.glob(f"{hwmon_base}/hwmon*")
+    
+    if hwmon_dirs:
+        for hwmon_dir in sorted(hwmon_dirs):
+            name_path = os.path.join(hwmon_dir, "name")
+            if os.path.exists(name_path):
+                try:
+                    with open(name_path, 'r') as f:
+                        driver_name = f.read().strip()
+                    hwmon_num = os.path.basename(hwmon_dir)
+                    print(f"  {hwmon_num}: {driver_name}")
+                except IOError:
+                    continue
+    else:
+        print("  No hwmon devices found")
+    
+    # Check specifically for hp-wmi
+    hp_wmi_path = "/sys/devices/platform/hp-wmi/hwmon"
+    if os.path.exists(hp_wmi_path):
+        hp_wmi_hwmon = glob.glob(f"{hp_wmi_path}/hwmon*")
+        if hp_wmi_hwmon:
+            print(f"  hp-wmi: Found ({len(hp_wmi_hwmon)} device(s))")
+        else:
+            print("  hp-wmi: Platform found but no hwmon devices")
+    else:
+        print("  hp-wmi: Not found")
+    print()
+    
+    # get ACPIi profiles
+    print("ACPI Platform Profiles:")
+    if os.path.exists(PROFILE_CHOICES_PATH):
+        try:
+            with open(PROFILE_CHOICES_PATH, 'r') as f:
+                choices = f.read().strip().split()
+            print(f"  Available: {', '.join(choices)}")
+        except IOError:
+            print("  Available: Unable to read choices")
+    else:
+        print("  Available: Not supported")
+    
+    if os.path.exists(PROFILE_PATH):
+        try:
+            with open(PROFILE_PATH, 'r') as f:
+                current = f.read().strip()
+            print(f"  Current: {current}")
+        except IOError:
+            print("  Current: Unable to read")
+    else:
+        print("  Current: Not supported")
+    print()
+    
+    # See if we can read fan control status
+    print("Fan Control:")
+    hwmon_path = find_hwmon_path()
+    if hwmon_path:
+        print(f"  hwmon path: {hwmon_path}")
+        
+        # Check pwm1_enable
+        pwm_enable_path = os.path.join(hwmon_path, "pwm1_enable")
+        if os.path.exists(pwm_enable_path):
+            try:
+                with open(pwm_enable_path, 'r') as f:
+                    status = f.read().strip()
+                status_map = {"0": "Max (Manual)", "2": "Auto (BIOS)"}
+                status_desc = status_map.get(status, f"Unknown ({status})")
+                print(f"  pwm1_enable: {status_desc}")
+            except IOError:
+                print("  pwm1_enable: Unable to read")
+        else:
+            print("  pwm1_enable: Not found")
+        
+        # Check fan inputs
+        fan_rpm = read_fan_rpm()
+        if fan_rpm:
+            for fan, rpm in fan_rpm.items():
+                print(f"  {fan}_input: {rpm} RPM")
+        else:
+            print("  fan inputs: Not found")
+    else:
+        print("  hwmon path: Not found")
+        print("  Fan control: hp-wmi hwmon device not available")
+
+# ACPI PROFILES!!
+PROFILE_CHOICES_PATH = "/sys/firmware/acpi/platform_profile_choices"
+PROFILE_PATH = "/sys/firmware/acpi/platform_profile"
+
+# Combined profiles: name -> (acpi_profile, fan_mode)
+COMBINED_PROFILES = {
+    "gaming":   ("performance", "max"),
+    "balanced": ("balanced",    "auto"),
+    "quiet":    ("cool",        "auto"),
+}
+
+def read_power_profile():
+    """ Try to read the current ACPI power profile """
+
+    if not os.path.exists(PROFILE_PATH):
+        print("Error: ACPI platform_profile not found.", file=sys.stderr)
+        print("Make sure your kernel supports platform profiles (5.15+).", file=sys.stderr)
+        return None
+
+    try:
+        with open(PROFILE_PATH, 'r') as f:
+            return f.read().strip()
+    except IOError as e:
+        print(f"Error reading power profile: {e}", file=sys.stderr)
+        return None
+
+
+def set_power_profile(profile):
+    """ Attempt to set the ACPI power profile """
+    # Validate what the hardware actually supports
+    try:
+        with open(PROFILE_CHOICES_PATH, 'r') as f:
+            valid = f.read().strip().split()
+    except IOError as e:
+        print(f"Error reading profile choices: {e}", file=sys.stderr)
+        return False
+
+    if profile not in valid:
+        print(f"Error: '{profile}' is not a valid profile.", file=sys.stderr)
+        print(f"Available profiles: {', '.join(valid)}", file=sys.stderr)
+        return False
+
+    try:
+        with open(PROFILE_PATH, 'w') as f:
+            f.write(profile)
+        print(f"Power profile set to: {profile}")
+        return True
+    except PermissionError:
+        print("Error: Permission denied. Run with sudo.", file=sys.stderr)
+        return False
+    except IOError as e:
+        print(f"Error writing power profile: {e}", file=sys.stderr)
+        return False
+
+def apply_combined_profile(name):
+    """ Apply the named combined profile for example = power mode + fan setting """
+    name = name.lower()
+    if name not in COMBINED_PROFILES:
+        print(f"Error: Unknown profile '{name}'.", file=sys.stderr)
+        print(f"Available profiles: {', '.join(COMBINED_PROFILES.keys())}", file=sys.stderr)
+        return False
+
+    acpi_profile, fan_mode = COMBINED_PROFILES[name]
+    success = True
+
+    print(f"Applying '{name}' profile...")
+
+    if not set_power_profile(acpi_profile):
+        success = False
+
+    if fan_mode == 'max':
+        if not set_fan_boost_mode('enable'):
+            success = False
+    elif fan_mode == 'auto':
+        if not set_fan_boost_mode('disable'):
+            success = False
+
+    if success:
+        print(f"Profile '{name}' applied successfully.")
+
+    return success
+
+def get_install_path():
+    """
+    Dynamically chooses the best installation path for openomen
+    Looks for existing installations, otherwise falls back to user or system directories
+    """
+    # If it's in the PATH, use that location
+    existing_path = shutil.which("openomen")
+    if existing_path:
+        return os.path.realpath(existing_path)
+    
+    # Define standard target directories
+    user_bin = os.path.expanduser("~/.local/bin")
+    system_bin = "/usr/local/bin"
+    
+    # Use user-space directory if it exists or is likely intended
+    if os.path.exists(user_bin) or not os.access(system_bin, os.W_OK):
+        # Create user bin directory if it somehow doesnt exist yet
+        os.makedirs(user_bin, exist_ok=True)
+        return os.path.join(user_bin, "openomen")
+        
+    return os.path.join(system_bin, "openomen")
+
+def update_openomen():
+    """ Update OpenOMEN to the latest version from GitHub releases """
+    INSTALL_PATH = get_install_path()
+    INSTALL_DIR = os.path.dirname(INSTALL_PATH)
+    
+    # Check if we need sudo to write to the install directory
+    needs_sudo = not os.access(INSTALL_DIR, os.W_OK) if os.path.exists(INSTALL_DIR) else not os.access(os.path.dirname(INSTALL_DIR), os.W_OK)
+    
+    # Create an SSL context that bypasses some stupid python certificate verification
+    ssl_context = ssl._create_unverified_context()
+
+    try:
+        print("")
+        print("OpenOMEN Updater")
+        print(f"Target Path: {INSTALL_PATH}")
+        print("")
+        print("Obtaining latest/current versions...")
+        
+        # Obtain latest release JSON
+        with urllib.request.urlopen("https://api.github.com/repos/openomen/openomen/releases/latest", context=ssl_context) as response:
+            latest_json = json.loads(response.read().decode())
+        
+        # Extract Version from the Latest Release
+        latest_version = latest_json.get("tag_name", "")
+        latest_version_clean = latest_version.replace("CLI_", "").replace("v", "").replace("V", "")
+        
+        print("")
+        print(f"Latest Version: v{latest_version_clean}")
+        
+        # Detect current version
+        if os.path.exists(INSTALL_PATH):
+            try:
+                result = subprocess.run([INSTALL_PATH], capture_output=True, text=True, timeout=5)
+                current_version_match = None
+                for line in result.stdout.split('\n'):
+                    if 'V' in line and any(c.isdigit() for c in line):
+                        match = re.search(r'V(\d+\.\d+\.\d+)', line)
+                        if match:
+                            current_version_match = match.group(1)
+                            break
+                
+                if current_version_match:
+                    print(f"Current Version: v{current_version_match}")
+                    
+                    if current_version_match == latest_version_clean:
+                        print("")
+                        print("You already have the latest version!")
+                        return True
+                else:
+                    print("Current Version: Unable to detect version")
+            except (subprocess.TimeoutExpired, subprocess.CalledProcessError, FileNotFoundError):
+                print("Current Version: Unable to run current binary")
+        else:
+            print("Current Version: Openomen is not installed.")
+        
+        print("Downloading new version...")
+        
+        # Get the binary file from the Latest Release
+        download_url = f"https://github.com/openomen/openomen/releases/download/{latest_version}/openomen"
+        
+        # Download file to temporary location
+        with tempfile.NamedTemporaryFile(mode='wb', delete=False, suffix='_openomen_new') as tmp_file:
+            tmp_path = tmp_file.name
+        
+        try:
+            with urllib.request.urlopen(download_url, context=ssl_context) as response:
+                with open(tmp_path, 'wb') as f:
+                    f.write(response.read())
+            
+            # Check downloaded file
+            if os.path.getsize(tmp_path) == 0:
+                print("ERROR: Download failed. Please check your internet connection and try again.")
+                os.unlink(tmp_path)
+                return False
+            
+            # Make the binary actually executable
+            os.chmod(tmp_path, 0o755)
+            
+            print("Verifying binary...")
+            
+            # Verify the binary
+            try:
+                result = subprocess.run([tmp_path], capture_output=True, text=True, timeout=5)
+                downloaded_version_match = None
+                for line in result.stdout.split('\n'):
+                    if 'V' in line and any(c.isdigit() for c in line):
+                        match = re.search(r'V(\d+\.\d+\.\d+)', line)
+                        if match:
+                            downloaded_version_match = match.group(1)
+                            break
+                
+                if not downloaded_version_match or downloaded_version_match != latest_version_clean:
+                    print("ERROR: The downloaded binary is either invalid or corrupted. Please try again.")
+                    os.unlink(tmp_path)
+                    return False
+            except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
+                print("ERROR: The downloaded binary is invalid or corrupted. Please try again.")
+                os.unlink(tmp_path)
+                return False
+            
+            print(f"Installing to '{INSTALL_PATH}'...")
+            
+            # Replace the old binary with the new one
+            try:
+                if needs_sudo:
+                    subprocess.run(['sudo', 'rm', '-f', INSTALL_PATH], check=True)
+                    subprocess.run(['sudo', 'mv', tmp_path, INSTALL_PATH], check=True)
+                else:
+                    if os.path.exists(INSTALL_PATH):
+                        os.remove(INSTALL_PATH)
+                    shutil.move(tmp_path, INSTALL_PATH)
+                
+                print("")
+                print(f"Updated correctly to Version v{latest_version_clean}")
+                return True
+            except (subprocess.CalledProcessError, OSError) as e:
+                print(f"ERROR: Failed to install: {e}")
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+                return False
+                
+        except urllib.error.URLError as e:
+            print(f"ERROR: Download failed: {e}")
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+            return False
+            
+    except urllib.error.URLError as e:
+        print(f"ERROR: Failed to fetch release information: {e}")
+        return False
+    except json.JSONDecodeError as e:
+        print(f"ERROR: Failed to parse release information: {e}")
+        return False
+    except KeyboardInterrupt:
+        print("\nUpdate cancelled by user.")
+        return False
+    except Exception as e:
+        print(f"ERROR: Unexpected error: {e}")
+        return False
+
+def run_doctor():
+    """ Run hardware compatibility checks """
+
+    print(f"OpenOMEN {VERSION} — Hardware Compatibility Check\n")
+
+    passed = 0
+    failed = 0
+
+    print("─── Kernel & Drivers ─────────────────")
+
+    # Check hp-wmi module
+    hp_wmi_found = False
+    try:
+        with open("/proc/modules", "r") as f:
+            modules = f.read()
+            if "hp_wmi" in modules:
+                print("[✓] hp-wmi kernel module loaded")
+                passed += 1
+                hp_wmi_found = True
+            else:
+                print("[✗] hp-wmi kernel module not loaded")
+                failed += 1
+    except IOError:
+        # Fallback to lsmod if /proc/modules is unreadable
+        try:
+            result = subprocess.run(["lsmod"], capture_output=True, text=True, timeout=5)
+            if "hp_wmi" in result.stdout:
+                print("[✓] hp-wmi kernel module loaded")
+                passed += 1
+                hp_wmi_found = True
+            else:
+                print("[✗] hp-wmi kernel module not loaded")
+                failed += 1
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            print("[✗] hp-wmi kernel module not loaded")
+            failed += 1
+
+    # Check hp_wmi_ec module
+    try:
+        with open("/proc/modules", "r") as f:
+            modules = f.read()
+            if "hp_wmi_ec" in modules:
+                print("[✓] hp_wmi_ec module loaded")
+                passed += 1
+            else:
+                print("[✗] hp_wmi_ec module not found (some models need this instead)")
+                failed += 1
+    except IOError:
+        try:
+            result = subprocess.run(["lsmod"], capture_output=True, text=True, timeout=5)
+            if "hp_wmi_ec" in result.stdout:
+                print("[✓] hp_wmi_ec module loaded")
+                passed += 1
+            else:
+                print("[✗] hp_wmi_ec module not found (some models need this instead)")
+                failed += 1
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            print("[✗] hp_wmi_ec module not found (some models need this instead)")
+            failed += 1
+
+    print("\n─── Fan Control ──────────────────────")
+
+    hwmon_path = find_hwmon_path()
+    if hwmon_path:
+        print(f"[✓] pwm1_enable found at {hwmon_path}")
+        passed += 1
+
+        # Check if pwm1_enable is writable
+        pwm_enable_path = os.path.join(hwmon_path, "pwm1_enable")
+        if os.access(pwm_enable_path, os.W_OK):
+            print("[✓] pwm1_enable is writable")
+            passed += 1
+        else:
+            print("[✗] pwm1_enable not writable (sudo required for fan control)")
+            failed += 1
+
+        # Check fan1_input
+        fan1_path = os.path.join(hwmon_path, "fan1_input")
+        if os.path.exists(fan1_path) and os.access(fan1_path, os.R_OK):
+            try:
+                with open(fan1_path, 'r') as f:
+                    fan1_rpm = int(f.read().strip())
+                print(f"[✓] fan1_input readable — {fan1_rpm} RPM")
+                passed += 1
+            except (IOError, ValueError):
+                print("[✗] fan1_input not readable (permission denied or invalid data)")
+                failed += 1
+        else:
+            print("[✗] fan1_input not found")
+            failed += 1
+
+        # Check fan2_input
+        fan2_path = os.path.join(hwmon_path, "fan2_input")
+        if os.path.exists(fan2_path) and os.access(fan2_path, os.R_OK):
+            try:
+                with open(fan2_path, 'r') as f:
+                    fan2_rpm = int(f.read().strip())
+                print(f"[✓] fan2_input readable — {fan2_rpm} RPM")
+                passed += 1
+            except (IOError, ValueError):
+                print("[✗] fan2_input not readable (permission denied or invalid data)")
+                failed += 1
+        else:
+            print("[✗] fan2_input not found — single fan model or unsupported")
+            failed += 1
+    else:
+        print("[✗] pwm1_enable not found (hp-wmi hwmon device unavailable)")
+        failed += 4 # All fan control checks fail
+
+    print("\n─── Thermal Sensors ──────────────────")
+    
+    # CPU temperature check
+    cpu_temp_found = False
+    cpu_driver = None
+    cpu_temp_value = None
+    
+    hwmon_base = "/sys/class/hwmon"
+    hwmon_dirs = glob.glob(f"{hwmon_base}/hwmon*")
+    
+    CPU_DRIVER_PRIORITY = [
+        "coretemp", "k10temp", "zenpower", "hp-wmi", "acpitz",
+    ]
+
+    def get_hwmon_driver_doctor(hwmon_dir):
+        name_path = os.path.join(hwmon_dir, "name")
+        if os.path.exists(name_path):
+            try:
+                with open(name_path, 'r') as f:
+                    return f.read().strip().lower()
+            except IOError:
+                pass
+        return ""
+
+    def read_hwmon_temps_doctor(hwmon_dir):
+        results = []
+        for temp_file in sorted(glob.glob(os.path.join(hwmon_dir, "temp*_input"))):
+            try:
+                with open(temp_file, 'r') as f:
+                    temp_celsius = int(f.read().strip()) / 1000.0
+                results.append((temp_file, temp_celsius))
+            except IOError:
+                continue
+        return results
+
+    # Build driver map
+    hwmon_by_driver = {}
+    for hwmon_dir in hwmon_dirs:
+        driver = get_hwmon_driver_doctor(hwmon_dir)
+        temps = read_hwmon_temps_doctor(hwmon_dir)
+        if temps:
+            hwmon_by_driver.setdefault(driver, []).append((hwmon_dir, temps))
+
+    # Check in priority order
+    for driver in CPU_DRIVER_PRIORITY:
+        if driver in hwmon_by_driver:
+            for hwmon_dir, temps in hwmon_by_driver[driver]:
+                for temp_file, temp_celsius in temps:
+                    label_path = temp_file.replace("_input", "_label")
+                    raw_label = ""
+                    if os.path.exists(label_path):
+                        try:
+                            with open(label_path, 'r') as lf:
+                                raw_label = lf.read().strip().lower()
+                        except IOError:
+                            pass
+                    SKIP_LABEL_KEYWORDS = ["spd", "dram", "dimm", "ram", "mem", "nvme", "hdd", "ssd", "fan"]
+                    if any(kw in raw_label for kw in SKIP_LABEL_KEYWORDS):
+                        continue
+                    cpu_temp_found = True
+                    cpu_driver = driver
+                    cpu_temp_value = temp_celsius
+                    break
+                if cpu_temp_found:
+                    break
+            if cpu_temp_found:
+                break
+
+    if cpu_temp_found:
+        print(f"[✓] CPU Thermal sensor found (driver: {cpu_driver}) — {cpu_temp_value:.1f}°C")
+        passed += 1
+    else:
+        print("[✗] No CPU thermal sensor detected")
+        failed += 1
+
+    print("\n─── Power Profiles ───────────────────")
+    
+    # Check platform_profile
+    if os.path.exists(PROFILE_PATH) and os.access(PROFILE_PATH, os.R_OK):
+        try:
+            with open(PROFILE_PATH, 'r') as f:
+                current_profile = f.read().strip()
+            print(f"[✓] ACPI platform_profile available — current: {current_profile}")
+            passed += 1
+        except IOError:
+            print("[✗] ACPI platform_profile not readable")
+            failed += 1
+    else:
+        print("[✗] ACPI platform_profile not available")
+        failed += 1
+    
+    # Check platform_profile_choices
+    if os.path.exists(PROFILE_CHOICES_PATH) and os.access(PROFILE_CHOICES_PATH, os.R_OK):
+        try:
+            with open(PROFILE_CHOICES_PATH, 'r') as f:
+                choices = f.read().strip().split()
+            print(f"[✓] Available profiles: {', '.join(choices)}")
+            passed += 1
+        except IOError:
+            print("[✗] platform_profile_choices not readable")
+            failed += 1
+    else:
+        print("[✗] platform_profile_choices not available")
+        failed += 1
+
+    print("\n─── GPU Stats ────────────────────────")
+    
+    # Check nvidia-smi
+    if shutil.which('nvidia-smi'):
+        print("[✓] nvidia-smi available")
+        passed += 1
+    else:
+        print("[✗] nvidia-smi not found — install nvidia-utils for full GPU stats")
+        failed += 1
+
+    # Check AMD GPU hwmon
+    amd_hwmon_found = False
+    amd_temp_paths = glob.glob("/sys/class/drm/card*/device/hwmon/hwmon*/temp1_input")
+    if amd_temp_paths:
+        print("[✓] AMD GPU hwmon found — basic temperature available")
+        passed += 1
+        amd_hwmon_found = True
+    else:
+        if not shutil.which('nvidia-smi'):
+            print("[✗] No GPU hwmon found — no GPU stats available")
+            failed += 1
+
+    print("\n─── Battery ──────────────────────────")
+    
+    # Check for THE battery
+    battery_paths = glob.glob("/sys/class/power_supply/BAT*")
+    if battery_paths:
+        battery_name = os.path.basename(battery_paths[0])
+        print(f"[✓] Battery found: {battery_name}")
+        passed += 1
+
+        # Check for charge_control_end_threshold
+        charge_control_path = os.path.join(battery_paths[0], "charge_control_end_threshold")
+        if os.path.exists(charge_control_path) and os.access(charge_control_path, os.R_OK):
+            try:
+                with open(charge_control_path, 'r') as f:
+                    threshold = f.read().strip()
+                print(f"[✓] charge_control_end_threshold available — current: {threshold}")
+                passed += 1
+            except IOError:
+                print("[✗] charge_control_end_threshold not readable")
+                failed += 1
+        else:
+            print("[✗] charge_control_end_threshold not found — battery charge limiting unavailable")
+            failed += 1
+    else:
+        print("[✗] Battery not found")
+        failed += 2
+
+    print("\n─── RGB Keyboard ──────────────────────")
+    rgb_hint = detect_rgb_hardware()
+    if rgb_hint:
+        print(f"[✓] RGB control interface detected: {rgb_hint}")
+        passed += 1
+    else:
+        print("[✗] No physical RGB control files found (/sys/devices/platform/hp-wmi/rgb_zones, keyboardleds, etc.)")
+        failed += 1
+
+    print(f"\nDoctor complete: {passed} passed, {failed} failed.")
+
+def monitor_stats_loop(interval=1.5):
+    try:
+        while True:
+            sys.stdout.write(CLEAR_SCREEN)
+            sys.stdout.write(HIDE_CURSOR)
+            sys.stdout.flush()
+            print("=== OpenOMEN Monitor Mode (Ctrl+C to exit) ===")
+            print()
+            read_all_stats()
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        print(SHOW_CURSOR, end="", flush=True)
+        print("\nExited.")
+
+# ============================================================
+# RGB Keyboard Control (0.4.0 — EXPERIMENTAL)
+#
+# This feature is new and untested across the full range of
+# OMEN/Victus hardware.
+#
+# If you have a supported device and want to help, see the
+# Discord: https://discord.gg/UHQ5cztbUj
+# ============================================================
+RGB_CONFIG_DIR = os.path.expanduser("~/.config/openomen/rgb")
+RGB_PROFILES_DIR = os.path.join(RGB_CONFIG_DIR, "profiles")
+RGB_STATE_PATH = os.path.join(RGB_CONFIG_DIR, "state.json")
+
+DEFAULT_RGB_PROFILES = {
+    "rainbow": {
+        "name": "Rainbow",
+        "description": "Static rainbow across all 4 zones",
+        "length_ms": 0,
+        "change": "instant",
+        "brightness": 100,
+        "speed": 100,
+        "loop": False,
+        "zones": {
+            "0": "#FF0000",
+            "1": "#FF7F00",
+            "2": "#00FF00",
+            "3": "#0000FF"
+        }
+    },
+    "white": {
+        "name": "White",
+        "description": "Static white, all zones",
+        "length_ms": 0,
+        "change": "instant",
+        "brightness": 100,
+        "speed": 100,
+        "loop": False,
+        "zones": {
+            "0": "#FFFFFF",
+            "1": "#FFFFFF",
+            "2": "#FFFFFF",
+            "3": "#FFFFFF"
+        }
+    },
+    "gaming": {
+        "name": "Gaming",
+        "description": "Red sides, blue middle zones",
+        "length_ms": 0,
+        "change": "instant",
+        "brightness": 100,
+        "speed": 100,
+        "loop": False,
+        "zones": {
+            "0": "#FF0000",
+            "1": "#0000FF",
+            "2": "#0000FF",
+            "3": "#FF0000"
+        }
+    },
+}
+
+def ensure_rgb_config():
+    if not os.path.exists(RGB_CONFIG_DIR):
+        os.makedirs(RGB_CONFIG_DIR, exist_ok=True)
+    if not os.path.exists(RGB_PROFILES_DIR):
+        os.makedirs(RGB_PROFILES_DIR, exist_ok=True)
+    for profile_id, data in DEFAULT_RGB_PROFILES.items():
+        profile_path = os.path.join(RGB_PROFILES_DIR, f"{profile_id}.json")
+        if not os.path.exists(profile_path):
+            try:
+                with open(profile_path, 'w') as f:
+                    json.dump(data, f, indent=4)
+            except IOError as e:
+                print(f"Warning: Failed to create default profile: {e}", file=sys.stderr)
+
+def read_rgb_state():
+    ensure_rgb_config()
+    if os.path.exists(RGB_STATE_PATH):
+        try:
+            with open(RGB_STATE_PATH, 'r') as f:
+                return json.load(f)
+        except (IOError, json.JSONDecodeError):
+            pass
+    return {"enabled": False, "active_profile": "white"}
+
+def write_rgb_state(state):
+    ensure_rgb_config()
+    try:
+        with open(RGB_STATE_PATH, 'w') as f:
+            json.dump(state, f, indent=4)
+        return True
+    except IOError as e:
+        print(f"Error: Could not save state file: {e}", file=sys.stderr)
+        return False
+
+def list_rgb_profiles():
+    ensure_rgb_config()
+    profiles = {}
+    for path in sorted(glob.glob(os.path.join(RGB_PROFILES_DIR, "*.json"))):
+        profile_id = os.path.splitext(os.path.basename(path))[0]
+        try:
+            with open(path, 'r') as f:
+                profiles[profile_id] = json.load(f)
+        except (IOError, json.JSONDecodeError) as e:
+            print(f"Warning: skipping invalid profile '{profile_id}': {e}", file=sys.stderr)
+    return profiles
+
+def load_rgb_profile(profile_id):
+    ensure_rgb_config()
+    path = os.path.join(RGB_PROFILES_DIR, f"{profile_id}.json")
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, 'r') as f:
+            return json.load(f)
+    except (IOError, json.JSONDecodeError) as e:
+        print(f"Error: could not read profile '{profile_id}': {e}", file=sys.stderr)
+        return None
+
+def detect_rgb_hardware():
+    """ My detection of a possible RGB control interface, might work might not...
+    """
+    if os.path.isdir("/sys/devices/platform/hp-wmi/rgb_zones"):
+        return "Four-Zone Control (rgb_zones)"
+    if os.path.exists("/sys/devices/platform/hp-wmi/keyboardleds"):
+        return "Legacy/Standard Control (keyboardleds)"
+    if os.path.exists("/sys/class/leds/hp_omen::kbd_backlight/zone_colors"):
+        return "Kernel Patch Control (zone_colors)"
+    return None
+
+def apply_rgb_hardware(profile):
+    """ Try to write colors directly to the detected HP OMEN RGB driver interface. """
+    ensure_root()
+    
+    hw_type = None
+    if os.path.isdir("/sys/devices/platform/hp-wmi/rgb_zones"):
+        hw_type = "four_zone"
+    elif os.path.exists("/sys/devices/platform/hp-wmi/keyboardleds"):
+        hw_type = "legacy"
+    elif os.path.exists("/sys/class/leds/hp_omen::kbd_backlight/zone_colors"):
+        hw_type = "kernel_patch"
+
+    if not hw_type:
+        print("Error: No supported RGB hardware interface detected.", file=sys.stderr)
+        print("Ensure you have a supported hp-wmi dkms module loaded.", file=sys.stderr)
+        return False
+
+    colors = ["000000"] * 4
+    if profile:
+        if "zones" in profile:
+            for i in range(4):
+                key = str(i)
+                if key in profile["zones"]:
+                    colors[i] = profile["zones"][key].replace("#", "").upper()
+        else:
+            fallback_color = "000000"
+            animation = profile.get("animation", {})
+            if "full" in animation and "0" in animation["full"]:
+                fallback_color = animation["full"]["0"].replace("#", "").upper()
+            colors = [fallback_color] * 4
+
+    try:
+        if hw_type == "four_zone":
+            for i in range(4):
+                zone_file = f"/sys/devices/platform/hp-wmi/rgb_zones/zone{i:02d}"
+                if os.path.exists(zone_file):
+                    with open(zone_file, "w") as f:
+                        f.write(colors[i])
+            print(f"Applied zone colors: {', '.join(colors)}")
+            return True
+
+        elif hw_type == "legacy":
+            concatenated = "".join(colors)
+            with open("/sys/devices/platform/hp-wmi/keyboardleds", "w") as f:
+                f.write(concatenated)
+            print(f"Applied concatenated colors: {concatenated}")
+            return True
+
+        elif hw_type == "kernel_patch":
+            binary_data = bytearray()
+            for col in colors:
+                r = int(col[0:2], 16)
+                g = int(col[2:4], 16)
+                b = int(col[4:6], 16)
+                binary_data.extend([r, g, b])
+            with open("/sys/class/leds/hp_omen::kbd_backlight/zone_colors", "wb") as f:
+                f.write(binary_data)
+            print(f"Applied binary zone colors: {binary_data.hex()}")
+            return True
+
+    except PermissionError:
+        print("Error: Permission denied writing to RGB control paths. Run with sudo.", file=sys.stderr)
+        return False
+    except IOError as e:
+        print(f"Error: Failed to write to RGB interface: {e}", file=sys.stderr)
+        return False
+
+    return False
+
+def rgb_status():
+    state = read_rgb_state()
+    profiles = list_rgb_profiles()
+    active = state.get("active_profile")
+    enabled = state.get("enabled", False)
+    print(f"Keyboard Lights: {'On' if enabled else 'Off'}")
+    if active and active in profiles:
+        print(f"Current Profile: {profiles[active].get('name', active)}")
+    else:
+        print("Current Profile: None set")
+    print(f"Available Profiles: {', '.join(p.get('name', pid) for pid, p in profiles.items()) or 'None'}")
+    return True
+
+def rgb_list():
+    profiles = list_rgb_profiles()
+    if not profiles:
+        print("No RGB profiles found.")
+        return True
+    print("Available Profiles:")
+    for profile_id, data in profiles.items():
+        name = data.get("name", profile_id)
+        desc = data.get("description", "")
+        if desc:
+            print(f" - {name}: {desc}")
+        else:
+            print(f" - {name}")
+    return True
+
+def rgb_set(profile_id):
+    profile_id = profile_id.lower()
+    profile = load_rgb_profile(profile_id)
+    if profile is None:
+        available = ', '.join(list_rgb_profiles().keys())
+        print(f"Error: Unknown RGB profile '{profile_id}'.", file=sys.stderr)
+        if available:
+            print(f"Available profiles: {available}", file=sys.stderr)
+        return False
+    state = read_rgb_state()
+    state["active_profile"] = profile_id
+    if not write_rgb_state(state):
+        return False
+    print(f"RGB Profile set to {profile.get('name', profile_id)}")
+    if state.get("enabled"):
+        apply_rgb_hardware(profile)
+    return True
+
+def rgb_power(on):
+    ensure_root()
+    state = read_rgb_state()
+    state["enabled"] = on
+    if not write_rgb_state(state):
+        return False
+    if on:
+        active = state.get("active_profile")
+        profile = load_rgb_profile(active) if active else None
+        if profile:
+            apply_rgb_hardware(profile)
+            print(f"Keyboard lights on (profile: {profile.get('name', active)})")
+        else:
+            print("Keyboard lights on (no active profile set — run 'openomen rgb set <name>')")
+    else:
+        apply_rgb_hardware(None)
+        print("Keyboard lights off")
+    return True
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="CLI tool for controlling fan behavior on HP OMEN/Victus laptops - V0.4.1 - audixdev",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Commands: fan, cpu, gpu, stats, info, power, rgb, doctor
+Run 'openomen <command> --help' for details.
+Run 'openomen <command> -w' to watch in real-time.
+"""
+    )
+    subparsers = parser.add_subparsers(dest='command', help='Available commands')
+    fan_parser = subparsers.add_parser('fan', help='Control fan behavior')
+    fan_subparsers = fan_parser.add_subparsers(dest='fan_command', help='Fan commands')
+    fan_subparsers.add_parser('max', help='Fans at maximum RPM')
+    fan_subparsers.add_parser('auto', help='Auto/BIOS control')
+    fan_subparsers.add_parser('toggle', help='Toggle fan max on/off')
+    fan_status_parser = fan_subparsers.add_parser('status', help='Show current fan status')
+    fan_status_parser.add_argument('-w', '--watch', action='store_true', help='Update every 2 seconds (exit with Ctrl+C)')
+    cpu_parser = subparsers.add_parser('cpu', help='Read current CPU stats')
+    cpu_parser.add_argument('-w', '--watch', action='store_true', help='Update every 2 seconds (exit with Ctrl+C)')
+    gpu_parser = subparsers.add_parser('gpu', help='Read current GPU stats')
+    gpu_parser.add_argument('-w', '--watch', action='store_true', help='Update every 2 seconds (exit with Ctrl+C)')
+    stats_parser = subparsers.add_parser('stats', help='Print snapshot of all systems')
+    stats_parser.add_argument('-w', '--watch', action='store_true', help='Update every 2 seconds (exit with Ctrl+C)')
+    subparsers.add_parser('info', help='Display diagnostic layout parameters')
+    power_parser = subparsers.add_parser('power', help='Manage power configurations')
+    power_subparsers = power_parser.add_subparsers(dest='power_command', help='Power commands')
+    set_parser = power_subparsers.add_parser('set', help='Set active ACPI power profile')
+    set_parser.add_argument('profile', help='Power profile name (e.g. performance, balanced, quiet)')
+    apply_parser = power_subparsers.add_parser('apply', help='Apply predefined profile templates')
+    apply_parser.add_argument('profile', help='Combined profile name')
+    power_subparsers.add_parser('list', help='List available profiles')
+
+    # RGB command (0.4.0)
+    rgb_parser = subparsers.add_parser('rgb', help='Control keyboard RGB lighting')
+    rgb_subparsers = rgb_parser.add_subparsers(dest='rgb_command', help='RGB commands')
+    rgb_subparsers.add_parser('status', help='Show current state and active profile')
+    rgb_subparsers.add_parser('list', help='List available RGB profiles')
+    rgb_set_parser = rgb_subparsers.add_parser('set', help='Set the active RGB profile')
+    rgb_set_parser.add_argument('profile', help='Profile name (e.g. rainbow, white, gaming)')
+    rgb_subparsers.add_parser('on', help='Turn keyboard lights on')
+    rgb_subparsers.add_parser('off', help='Turn keyboard lights off')
+
+    subparsers.add_parser('doctor', help='Check hardware compatibility and driver status')
+    subparsers.add_parser('update', help='Update OpenOMEN to the latest version')
+    parser.add_argument('-v', '--version', action='version', version=f'%(prog)s {VERSION}')
+
+    args = parser.parse_args()
+    if not args.command:
+        parser.print_help()
+        return 1
+
+    if args.command == 'fan':
+        if not args.fan_command:
+            fan_parser.print_help()
+            return 1
+        if args.fan_command == 'max':
+            ensure_root()
+            return 0 if set_fan_boost_mode('enable') else 1
+        elif args.fan_command == 'auto':
+            ensure_root()
+            return 0 if set_fan_boost_mode('disable') else 1
+        elif args.fan_command == 'toggle':
+            ensure_root()
+            return 0 if toggle_fan_boost() else 1
+        elif args.fan_command == 'status':
+            if args.watch:
+                monitor_stats_loop()
+                return 0
+            else:
+                return 0 if read_fan_status() else 1
+
+    elif args.command == 'cpu':
+        if args.watch:
+            monitor_stats_loop()
+            return 0
+        else:
+            return 0 if read_cpu_stats() else 1
+
+    elif args.command == 'gpu':
+        if args.watch:
+            monitor_stats_loop()
+            return 0
+        else:
+            return 0 if read_gpu_stats() else 1
+
+    elif args.command == 'stats':
+        read_all_stats()
+        return 0
+
+    elif args.command == 'info':
+        read_system_info()
+        return 0
+
+    elif args.command == 'power':
+        if not args.power_command:
+            power_parser.print_help()
+            return 1
+        if args.power_command == 'set':
+            ensure_root()
+            return 0 if set_power_profile(args.profile) else 1
+        elif args.power_command == 'apply':
+            ensure_root()
+            return 0 if apply_combined_profile(args.profile) else 1
+        elif args.power_command == 'list':
+            try:
+                with open(PROFILE_CHOICES_PATH, 'r') as f:
+                    choices = f.read().strip().split()
+                print("ACPI profiles:    " + ", ".join(choices))
+                print("Combined profiles: " + ", ".join(COMBINED_PROFILES.keys()))
+                return 0
+            except IOError as e:
+                print(f"Error: {e}", file=sys.stderr)
+                return 1
+
+    elif args.command == 'rgb':
+        if not args.rgb_command:
+            rgb_parser.print_help()
+            return 1
+        if args.rgb_command == 'status':
+            return 0 if rgb_status() else 1
+        elif args.rgb_command == 'list':
+            return 0 if rgb_list() else 1
+        elif args.rgb_command == 'set':
+            return 0 if rgb_set(args.profile) else 1
+        elif args.rgb_command == 'on':
+            return 0 if rgb_power(True) else 1
+        elif args.rgb_command == 'off':
+            return 0 if rgb_power(False) else 1
+
+    elif args.command == 'doctor':
+        ensure_root()
+        run_doctor()
+        return 0
+
+    elif args.command == 'update':
+        return 0 if update_openomen() else 1
+
+    return 0
+
+if __name__ == '__main__':
+    sys.exit(main())
