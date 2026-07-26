@@ -6,7 +6,7 @@
 
 [![Latest Release](https://img.shields.io/github/v/release/openomen/openomen?label=release)](https://github.com/openomen/openomen/releases/latest)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-green.svg)](LICENSE)
-[![Discord](https://img.shields.io/discord/1496418617716375615?label=discord&logo=discord)](https://discord.gg/UHQ5cztbUj)
+[![Discord](https://img.shields.io/discord/1496418617716375615?label=discord&logo=discord&refresh=1)](https://discord.gg/UHQ5cztbUj)
 [![Stars](https://img.shields.io/github/stars/openomen/openomen?style=social)](https://github.com/openomen/openomen/stargazers)
 
 [Website](https://openomen.github.io/) · [Wiki](https://github.com/openomen/openomen/wiki) · [Discord](https://discord.gg/UHQ5cztbUj) · [Report a Bug](https://github.com/openomen/openomen/issues) · [Request a Feature](https://github.com/openomen/openomen/issues)
