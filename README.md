@@ -158,12 +158,6 @@ Common questions are answered on the [Support & FAQ wiki page](https://github.co
 
 ---
 
-## License
-
-*[Add your chosen license here, e.g. MIT, GPLv3, Apache-2.0 — and include a matching `LICENSE` file in the repo root.]*
-
----
-
 ## Disclaimer
 
 OpenOMEN is an independent, open-source project and is **not affiliated with, endorsed by, or sponsored by HP Inc.** or the OMEN / Victus brands.
