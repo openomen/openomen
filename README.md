@@ -5,7 +5,7 @@
 **Unofficial CLI, driver, and daemon for managing HP OMEN / Victus laptops on Linux**
 
 [![Latest Release](https://img.shields.io/github/v/release/openomen/openomen?label=release)](https://github.com/openomen/openomen/releases/latest)
-[![License](https://img.shields.io/github/license/openomen/openomen)](LICENSE)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![Discord](https://img.shields.io/discord/UHQ5cztbUj?label=discord&logo=discord)](https://discord.gg/UHQ5cztbUj)
 [![Stars](https://img.shields.io/github/stars/openomen/openomen?style=social)](https://github.com/openomen/openomen/stargazers)
 
