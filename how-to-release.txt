@@ -1,0 +1,68 @@
+OpenOMEN - How to Build and Release Binary
+
+This document explains how to build the OpenOMEN CLI into a standalone Linux binary using a Python virtual environment and PyInstaller.
+
+------------------------------------------------------------
+1. REQUIREMENTS
+------------------------------------------------------------
+
+Make sure you have:
+
+- Python 3 installed
+- venv module available
+
+Install venv if needed.
+
+------------------------------------------------------------
+2. CREATE VIRTUAL ENVIRONMENT
+------------------------------------------------------------
+
+From the project root directory:
+
+    python3 -m venv .venv
+
+Activate it:
+
+    source .venv/bin/activate
+
+You should now see (.venv) in your terminal.
+
+------------------------------------------------------------
+3. INSTALL DEPENDENCIES
+------------------------------------------------------------
+
+Upgrade pip:
+
+    python -m pip install --upgrade pip
+
+Install PyInstaller:
+
+    pip install pyinstaller
+
+------------------------------------------------------------
+4. BUILD BINARY
+------------------------------------------------------------
+
+From the project root (with venv activated):
+
+    pyinstaller --onefile --name openomen openomen
+
+If your entry file is different, replace openomen accordingly.
+
+------------------------------------------------------------
+5. OUTPUT
+------------------------------------------------------------
+
+The compiled binary will be located at:
+
+    dist/openomen
+
+This is the standalone executable for Linux.
+
+------------------------------------------------------------
+7. NOTES
+------------------------------------------------------------
+
+- The binary is Linux-specific (not cross-platform)
+- Root privileges (sudo) are required for hardware control
+- Tested primarily on HP OMEN / Victus laptops
