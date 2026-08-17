@@ -30,7 +30,7 @@ import contextlib
 import shutil
 import ssl
 
-VERSION = "0.4.1"
+VERSION = "0.4.2"
 APP_NAME = "OpenOMEN CLI"
 
 CLEAR_SCREEN = "\033[2J\033[H"
@@ -398,91 +398,143 @@ def read_cpu_stats():
 
     return True
 
+def get_amd_driver_info(card_device_dir):
+    """ Helper to detect active AMD GPU Driver (amdgpu, radeon, fglrx/catalyst) """
+    driver_link = os.path.join(card_device_dir, "driver")
+    if os.path.exists(driver_link):
+        try:
+            driver_name = os.path.basename(os.readlink(driver_link))
+            if driver_name in ["amdgpu", "radeon", "fglrx"]:
+                return driver_name
+        except OSError:
+            pass
+    # Fallback module scan
+    try:
+        with open("/proc/modules", "r") as f:
+            modules = f.read()
+            for drv in ["amdgpu", "radeon", "fglrx"]:
+                if drv in modules:
+                    return drv
+    except IOError:
+        pass
+    return "AMD Kernel Driver"
+
 def read_gpu_stats():
     """
-    Read GPU temperature, utilization and VRAM from nvidia-smi.
-    Falls back to /sys/class/drm for AMD GPUs
+    Read GPU temperature, utilization, and specs across multi-GPU setups.
+    Supports NVIDIA (nvidia-smi), AMD (sysfs/drm), and Intel (sysfs/drm/iGPU/Arc).
     """
-    gpu_name = "Unknown GPU"
-    
-    # Try to get GPU name from nvidia-smi first
-    try:
-        result = subprocess.run(
-            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=5
-        )
-        if result.returncode == 0:
-            gpu_name = result.stdout.strip()
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
-    
-    # Try AMD GPU name from /sys/class/drm
-    if gpu_name == "Unknown GPU":
-        try:
-            # Look for AMD GPU card directories
-            amd_card_dirs = glob.glob("/sys/class/drm/card*/device")
-            for card_dir in amd_card_dirs:
-                vendor_file = os.path.join(card_dir, "vendor")
-                if os.path.exists(vendor_file):
-                    with open(vendor_file, 'r') as f:
-                        vendor = f.read().strip()
-                        # AMD vendor ID is 0x1002
-                        if vendor == "0x1002":
-                            # Try to get GPU name from modalias or other files
-                            modalias_file = os.path.join(card_dir, "modalias")
-                            if os.path.exists(modalias_file):
-                                with open(modalias_file, 'r') as f:
-                                    modalias = f.read().strip()
-                                    # Extract GPU info from modalias
-                                    if "pci:v00001002" in modalias:
-                                        # This is an AMD GPU, try to get more specific info
-                                        gpu_name = "AMD GPU"
-                                        break
-        except IOError:
-            pass
-    
-    print(f"GPU:              {gpu_name}\n")
-    
-    # Try NVIDIA for stats
+    gpus_found = 0
+
+    # --- 1. NVIDIA GPU Detection & Stats ---
     try:
         result = subprocess.run(
             [
                 "nvidia-smi",
-                "--query-gpu=temperature.gpu,utilization.gpu,memory.used,memory.total,power.draw",
+                "--query-gpu=name,temperature.gpu,utilization.gpu,memory.used,memory.total,power.draw",
                 "--format=csv,noheader,nounits"
             ],
             capture_output=True, text=True, timeout=5
         )
-        if result.returncode == 0:
-            parts = [p.strip() for p in result.stdout.strip().split(",")]
-            temp, util, vram_used, vram_total, power = parts
-            print(f"GPU Temperature:  {temp}°C")
-            print(f"GPU Utilization:  {util}%")
-            print(f"GPU VRAM:         {vram_used} / {vram_total} MiB")
-            print(f"GPU Power Draw:   {power} W")
-            return True
+        if result.returncode == 0 and result.stdout.strip():
+            lines = result.stdout.strip().split("\n")
+            for idx, line in enumerate(lines):
+                parts = [p.strip() for p in line.split(",")]
+                if len(parts) >= 5:
+                    gpu_name, temp, util, vram_used, vram_total = parts[:5]
+                    power = parts[5] if len(parts) > 5 else "N/A"
+                    gpus_found += 1
+                    print(f"GPU {gpus_found} (NVIDIA):    {gpu_name}")
+                    print(f"  Temperature:    {temp}°C")
+                    print(f"  Utilization:    {util}%")
+                    print(f"  VRAM:           {vram_used} / {vram_total} MiB")
+                    print(f"  Power Draw:     {power} W\n")
     except KeyboardInterrupt:
         print("\nGPU stats reading cancelled by user.")
         return False
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
 
-    # Fallback: AMD via /sys/class/drm
-    amd_temp_paths = glob.glob("/sys/class/drm/card*/device/hwmon/hwmon*/temp1_input")
-    if amd_temp_paths:
-        try:
-            with open(amd_temp_paths[0], 'r') as f:
-                temp = int(f.read().strip()) / 1000.0
-            print(f"GPU Temperature: {temp:.1f}°C")
-            return True
-        except IOError as e:
-            print(f"Error reading AMD GPU temp: {e}", file=sys.stderr)
-        except KeyboardInterrupt:
-            print("\nGPU stats reading cancelled by user.")
-            return False
+    # --- 2. AMD & Intel DRM GPU Detection & Stats ---
+    try:
+        card_dirs = sorted(glob.glob("/sys/class/drm/card[0-9]*/device"))
+        for card_dir in card_dirs:
+            vendor_file = os.path.join(card_dir, "vendor")
+            if not os.path.exists(vendor_file):
+                continue
+            
+            with open(vendor_file, 'r') as f:
+                vendor = f.read().strip().lower()
 
-    print("Error: No GPU found (nvidia-smi unavailable, no AMD hwmon).", file=sys.stderr)
-    return False
+            # --- AMD GPUs (Vendor ID 0x1002) ---
+            if vendor == "0x1002":
+                gpus_found += 1
+                driver_name = get_amd_driver_info(card_dir)
+                print(f"GPU {gpus_found} (AMD):       {driver_name.upper()} Architecture")
+                
+                # Temperature lookup
+                hwmon_temps = glob.glob(os.path.join(card_dir, "hwmon/hwmon*/temp1_input"))
+                if hwmon_temps:
+                    try:
+                        with open(hwmon_temps[0], 'r') as tf:
+                            temp = int(tf.read().strip()) / 1000.0
+                        print(f"  Temperature:    {temp:.1f}°C")
+                    except IOError:
+                        pass
+                
+                # Utilization lookup
+                busy_file = os.path.join(card_dir, "gpu_busy_percent")
+                if os.path.exists(busy_file):
+                    try:
+                        with open(busy_file, 'r') as bf:
+                            util = bf.read().strip()
+                        print(f"  Utilization:    {util}%")
+                    except IOError:
+                        pass
+                print()
+
+            # --- Intel GPUs (Vendor ID 0x8086 - iGPU or Desktop ARC) ---
+            elif vendor == "0x8086":
+                gpus_found += 1
+                gpu_type = "Intel Arc / iGPU"
+                print(f"GPU {gpus_found} (Intel):     {gpu_type}")
+                
+                # Thermal lookup
+                hwmon_temps = glob.glob(os.path.join(card_dir, "hwmon/hwmon*/temp1_input"))
+                if hwmon_temps:
+                    try:
+                        with open(hwmon_temps[0], 'r') as tf:
+                            temp = int(tf.read().strip()) / 1000.0
+                        print(f"  Temperature:    {temp:.1f}°C")
+                    except IOError:
+                        pass
+
+                # Frequency lookup (i915/xe)
+                freq_file = os.path.join(card_dir, "drm/card0/gt_cur_freq_mhz")
+                if not os.path.exists(freq_file):
+                    freq_file = glob.glob(os.path.join(card_dir, "gt*/freq0/act_freq"))
+                    freq_file = freq_file[0] if freq_file else None
+
+                if freq_file and os.path.exists(freq_file):
+                    try:
+                        with open(freq_file, 'r') as ff:
+                            freq = ff.read().strip()
+                        print(f"  Frequency:      {freq} MHz")
+                    except IOError:
+                        pass
+                print()
+
+    except KeyboardInterrupt:
+        print("\nGPU stats reading cancelled by user.")
+        return False
+    except IOError as e:
+        print(f"Error reading sysfs GPU stats: {e}", file=sys.stderr)
+
+    if gpus_found == 0:
+        print("Error: No GPU found (nvidia-smi unavailable, no AMD/Intel hwmon).", file=sys.stderr)
+        return False
+
+    return True
 
 def read_all_stats():
     """
@@ -566,42 +618,40 @@ def read_system_info():
         print("  Cores: Unable to detect")
     print()
     
-    # Get GPU information
+    # Get GPU information (Multi-GPU Detection Engine)
     print("GPU Information:")
     gpu_detected = False
     
-    # Try NVIDIA
+    # Check NVIDIA GPUs
     try:
         result = subprocess.run(
             ["nvidia-smi", "--query-gpu=name,driver_version", "--format=csv,noheader,nounits"],
             capture_output=True, text=True, timeout=5
         )
-        if result.returncode == 0:
-            nvidia_info = result.stdout.strip().split(",")
-            if len(nvidia_info) >= 2:
-                print(f"  NVIDIA: {nvidia_info[0].strip()}")
-                print(f"  Driver: {nvidia_info[1].strip()}")
-                gpu_detected = True
+        if result.returncode == 0 and result.stdout.strip():
+            for line in result.stdout.strip().split("\n"):
+                nvidia_info = line.split(",")
+                if len(nvidia_info) >= 2:
+                    print(f"  NVIDIA: {nvidia_info[0].strip()} (Driver: {nvidia_info[1].strip()})")
+                    gpu_detected = True
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
     
-    # Try AMD
+    # Check AMD and Intel GPUs
     try:
-        amd_card_dirs = glob.glob("/sys/class/drm/card*/device")
-        for card_dir in amd_card_dirs:
+        card_dirs = glob.glob("/sys/class/drm/card*/device")
+        for card_dir in card_dirs:
             vendor_file = os.path.join(card_dir, "vendor")
             if os.path.exists(vendor_file):
                 with open(vendor_file, 'r') as f:
-                    vendor = f.read().strip()
+                    vendor = f.read().strip().lower()
                     if vendor == "0x1002":  # AMD vendor ID
-                        modalias_file = os.path.join(card_dir, "modalias")
-                        if os.path.exists(modalias_file):
-                            with open(modalias_file, 'r') as f:
-                                modalias = f.read().strip()
-                                if "pci:v00001002" in modalias:
-                                    print("  AMD: GPU detected (PCI device)")
-                                    gpu_detected = True
-                                    break
+                        driver_name = get_amd_driver_info(card_dir)
+                        print(f"  AMD: GPU detected (Driver: {driver_name})")
+                        gpu_detected = True
+                    elif vendor == "0x8086":  # Intel vendor ID
+                        print("  Intel: iGPU / Arc Desktop Graphics detected")
+                        gpu_detected = True
     except IOError:
         pass
     
@@ -640,7 +690,7 @@ def read_system_info():
         print("  hp-wmi: Not found")
     print()
     
-    # get ACPIi profiles
+    # get ACPI profiles
     print("ACPI Platform Profiles:")
     if os.path.exists(PROFILE_CHOICES_PATH):
         try:
@@ -798,144 +848,144 @@ def get_install_path():
         
     return os.path.join(system_bin, "openomen")
 
-def update_openomen():
-    """ Update OpenOMEN to the latest version from GitHub releases """
+def update_openomen(force=False, verify=True):
+    """ 
+    Update OpenOMEN to the latest executable. 
+    Supports -f/--force for direct URL retrieval bypassing version checks,
+    and --no-verify to bypass version validation post-download.
+    """
     INSTALL_PATH = get_install_path()
     INSTALL_DIR = os.path.dirname(INSTALL_PATH)
     
-    # Check if we need sudo to write to the install directory
     needs_sudo = not os.access(INSTALL_DIR, os.W_OK) if os.path.exists(INSTALL_DIR) else not os.access(os.path.dirname(INSTALL_DIR), os.W_OK)
-    
-    # Create an SSL context that bypasses some stupid python certificate verification
     ssl_context = ssl._create_unverified_context()
 
     try:
-        print("")
-        print("OpenOMEN Updater")
+        print("\nOpenOMEN Updater")
         print(f"Target Path: {INSTALL_PATH}")
-        print("")
-        print("Obtaining latest/current versions...")
-        
-        # Obtain latest release JSON
-        with urllib.request.urlopen("https://api.github.com/repos/openomen/openomen/releases/latest", context=ssl_context) as response:
-            latest_json = json.loads(response.read().decode())
-        
-        # Extract Version from the Latest Release
-        latest_version = latest_json.get("tag_name", "")
-        latest_version_clean = latest_version.replace("CLI_", "").replace("v", "").replace("V", "")
-        
-        print("")
-        print(f"Latest Version: v{latest_version_clean}")
-        
-        # Detect current version
-        if os.path.exists(INSTALL_PATH):
-            try:
-                result = subprocess.run([INSTALL_PATH], capture_output=True, text=True, timeout=5)
-                current_version_match = None
-                for line in result.stdout.split('\n'):
-                    if 'V' in line and any(c.isdigit() for c in line):
-                        match = re.search(r'V(\d+\.\d+\.\d+)', line)
-                        if match:
-                            current_version_match = match.group(1)
-                            break
-                
-                if current_version_match:
-                    print(f"Current Version: v{current_version_match}")
-                    
-                    if current_version_match == latest_version_clean:
-                        print("")
-                        print("You already have the latest version!")
-                        return True
-                else:
-                    print("Current Version: Unable to detect version")
-            except (subprocess.TimeoutExpired, subprocess.CalledProcessError, FileNotFoundError):
-                print("Current Version: Unable to run current binary")
+        if force:
+            print("Mode: FORCED (Direct download from latest release shortcut)")
+        if not verify:
+            print("Verification: DISABLED")
+        print()
+
+        latest_version_clean = None
+        download_url = None
+
+        if force:
+            # Direct link download without querying GitHub API releases endpoints
+            download_url = "https://github.com/openomen/openomen/releases/latest/download/openomen"
+            print("Fetching directly from: releases/latest/download/openomen")
         else:
-            print("Current Version: Openomen is not installed.")
+            print("Obtaining latest version info...")
+            with urllib.request.urlopen("https://api.github.com/repos/openomen/openomen/releases/latest", context=ssl_context) as response:
+                latest_json = json.loads(response.read().decode())
+            
+            latest_version = latest_json.get("tag_name", "")
+            latest_version_clean = latest_version.replace("CLI_", "").replace("v", "").replace("V", "")
+            print(f"Latest Version: v{latest_version_clean}")
+
+            # Check local current version
+            if os.path.exists(INSTALL_PATH):
+                try:
+                    result = subprocess.run([INSTALL_PATH], capture_output=True, text=True, timeout=5)
+                    current_version_match = None
+                    for line in result.stdout.split('\n'):
+                        if 'V' in line and any(c.isdigit() for c in line):
+                            match = re.search(r'V(\d+\.\d+\.\d+)', line)
+                            if match:
+                                current_version_match = match.group(1)
+                                break
+                    
+                    if current_version_match:
+                        print(f"Current Version: v{current_version_match}")
+                        if current_version_match == latest_version_clean:
+                            print("\nYou already have the latest version! Use '--force' to reinstall anyway.")
+                            return True
+                    else:
+                        print("Current Version: Unable to detect version")
+                except (subprocess.TimeoutExpired, subprocess.CalledProcessError, FileNotFoundError):
+                    print("Current Version: Unable to run current binary")
+            else:
+                print("Current Version: Openomen is not installed.")
+
+            download_url = f"https://github.com/openomen/openomen/releases/download/{latest_version}/openomen"
+
+        print("Downloading latest executable...")
         
-        print("Downloading new version...")
-        
-        # Get the binary file from the Latest Release
-        download_url = f"https://github.com/openomen/openomen/releases/download/{latest_version}/openomen"
-        
-        # Download file to temporary location
         with tempfile.NamedTemporaryFile(mode='wb', delete=False, suffix='_openomen_new') as tmp_file:
             tmp_path = tmp_file.name
-        
+
         try:
-            with urllib.request.urlopen(download_url, context=ssl_context) as response:
+            req = urllib.request.Request(
+                download_url,
+                headers={'User-Agent': 'Mozilla/5.0'}
+            )
+            with urllib.request.urlopen(req, context=ssl_context) as response:
                 with open(tmp_path, 'wb') as f:
                     f.write(response.read())
-            
-            # Check downloaded file
+
             if os.path.getsize(tmp_path) == 0:
-                print("ERROR: Download failed. Please check your internet connection and try again.")
+                print("ERROR: Downloaded executable size is 0 bytes. Update failed.")
                 os.unlink(tmp_path)
                 return False
-            
-            # Make the binary actually executable
+
             os.chmod(tmp_path, 0o755)
-            
-            print("Verifying binary...")
-            
-            # Verify the binary
-            try:
-                result = subprocess.run([tmp_path], capture_output=True, text=True, timeout=5)
-                downloaded_version_match = None
-                for line in result.stdout.split('\n'):
-                    if 'V' in line and any(c.isdigit() for c in line):
-                        match = re.search(r'V(\d+\.\d+\.\d+)', line)
-                        if match:
-                            downloaded_version_match = match.group(1)
-                            break
-                
-                if not downloaded_version_match or downloaded_version_match != latest_version_clean:
-                    print("ERROR: The downloaded binary is either invalid or corrupted. Please try again.")
+
+            if verify:
+                print("Verifying binary execution...")
+                try:
+                    result = subprocess.run([tmp_path], capture_output=True, text=True, timeout=5)
+                    downloaded_version_match = None
+                    for line in result.stdout.split('\n'):
+                        if 'V' in line and any(c.isdigit() for c in line):
+                            match = re.search(r'V(\d+\.\d+\.\d+)', line)
+                            if match:
+                                downloaded_version_match = match.group(1)
+                                break
+                    
+                    if not force and latest_version_clean:
+                        if not downloaded_version_match or downloaded_version_match != latest_version_clean:
+                            print("ERROR: Downloaded binary version verification failed.")
+                            os.unlink(tmp_path)
+                            return False
+                except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
+                    print("ERROR: Downloaded binary execution test failed.")
                     os.unlink(tmp_path)
                     return False
-            except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
-                print("ERROR: The downloaded binary is invalid or corrupted. Please try again.")
-                os.unlink(tmp_path)
-                return False
+            else:
+                print("Skipping post-download validation check (--no-verify set).")
+
+            print(f"Installing binary to '{INSTALL_PATH}'...")
             
-            print(f"Installing to '{INSTALL_PATH}'...")
+            if needs_sudo:
+                subprocess.run(['sudo', 'rm', '-f', INSTALL_PATH], check=True)
+                subprocess.run(['sudo', 'mv', tmp_path, INSTALL_PATH], check=True)
+            else:
+                if os.path.exists(INSTALL_PATH):
+                    os.remove(INSTALL_PATH)
+                shutil.move(tmp_path, INSTALL_PATH)
             
-            # Replace the old binary with the new one
-            try:
-                if needs_sudo:
-                    subprocess.run(['sudo', 'rm', '-f', INSTALL_PATH], check=True)
-                    subprocess.run(['sudo', 'mv', tmp_path, INSTALL_PATH], check=True)
-                else:
-                    if os.path.exists(INSTALL_PATH):
-                        os.remove(INSTALL_PATH)
-                    shutil.move(tmp_path, INSTALL_PATH)
-                
-                print("")
-                print(f"Updated correctly to Version v{latest_version_clean}")
-                return True
-            except (subprocess.CalledProcessError, OSError) as e:
-                print(f"ERROR: Failed to install: {e}")
-                if os.path.exists(tmp_path):
-                    os.unlink(tmp_path)
-                return False
-                
+            print("\nSuccessfully updated OpenOMEN to the latest binary release!")
+            return True
+
         except urllib.error.URLError as e:
             print(f"ERROR: Download failed: {e}")
             if os.path.exists(tmp_path):
                 os.unlink(tmp_path)
             return False
-            
+
     except urllib.error.URLError as e:
-        print(f"ERROR: Failed to fetch release information: {e}")
+        print(f"ERROR: Network query failed: {e}")
         return False
     except json.JSONDecodeError as e:
-        print(f"ERROR: Failed to parse release information: {e}")
+        print(f"ERROR: Failed to parse GitHub API response: {e}")
         return False
     except KeyboardInterrupt:
-        print("\nUpdate cancelled by user.")
+        print("\nUpdate process interrupted by user.")
         return False
     except Exception as e:
-        print(f"ERROR: Unexpected error: {e}")
+        print(f"ERROR: Unexpected update failure: {e}")
         return False
 
 def run_doctor():
@@ -1159,20 +1209,33 @@ def run_doctor():
         print("[✓] nvidia-smi available")
         passed += 1
     else:
-        print("[✗] nvidia-smi not found — install nvidia-utils for full GPU stats")
+        print("[✗] nvidia-smi not found — install nvidia-utils for NVIDIA GPU stats")
         failed += 1
 
-    # Check AMD GPU hwmon
-    amd_hwmon_found = False
-    amd_temp_paths = glob.glob("/sys/class/drm/card*/device/hwmon/hwmon*/temp1_input")
-    if amd_temp_paths:
-        print("[✓] AMD GPU hwmon found — basic temperature available")
-        passed += 1
-        amd_hwmon_found = True
-    else:
-        if not shutil.which('nvidia-smi'):
-            print("[✗] No GPU hwmon found — no GPU stats available")
-            failed += 1
+    # Check AMD / Intel DRM hwmon
+    drm_hwmon_found = False
+    card_dirs = glob.glob("/sys/class/drm/card*/device")
+    for card_dir in card_dirs:
+        vendor_file = os.path.join(card_dir, "vendor")
+        if os.path.exists(vendor_file):
+            try:
+                with open(vendor_file, 'r') as vf:
+                    v_id = vf.read().strip().lower()
+                    if v_id == "0x1002":
+                        driver_name = get_amd_driver_info(card_dir)
+                        print(f"[✓] AMD GPU hwmon found (Driver: {driver_name})")
+                        passed += 1
+                        drm_hwmon_found = True
+                    elif v_id == "0x8086":
+                        print("[✓] Intel Graphics (iGPU/Arc) detected")
+                        passed += 1
+                        drm_hwmon_found = True
+            except IOError:
+                pass
+
+    if not drm_hwmon_found and not shutil.which('nvidia-smi'):
+        print("[✗] No GPU hwmon or tools found — no GPU stats available")
+        failed += 1
 
     print("\n─── Battery ──────────────────────────")
     
@@ -1348,8 +1411,7 @@ def load_rgb_profile(profile_id):
         return None
 
 def detect_rgb_hardware():
-    """ My detection of a possible RGB control interface, might work might not...
-    """
+    """ Detection of a possible RGB control interface """
     if os.path.isdir("/sys/devices/platform/hp-wmi/rgb_zones"):
         return "Four-Zone Control (rgb_zones)"
     if os.path.exists("/sys/devices/platform/hp-wmi/keyboardleds"):
@@ -1359,7 +1421,7 @@ def detect_rgb_hardware():
     return None
 
 def apply_rgb_hardware(profile):
-    """ Try to write colors directly to the detected HP OMEN RGB driver interface. """
+    """ Write colors directly to the detected HP OMEN RGB driver interface. """
     ensure_root()
     
     hw_type = None
@@ -1494,10 +1556,10 @@ def rgb_power(on):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="CLI tool for controlling fan behavior on HP OMEN/Victus laptops - V0.4.1 - audixdev",
+        description="CLI tool for controlling fan behavior on HP OMEN/Victus laptops - V0.4.2 - audixdev",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Commands: fan, cpu, gpu, stats, info, power, rgb, doctor
+Commands: fan, cpu, gpu, stats, info, power, rgb, doctor, update
 Run 'openomen <command> --help' for details.
 Run 'openomen <command> -w' to watch in real-time.
 """
@@ -1525,7 +1587,7 @@ Run 'openomen <command> -w' to watch in real-time.
     apply_parser.add_argument('profile', help='Combined profile name')
     power_subparsers.add_parser('list', help='List available profiles')
 
-    # RGB command (0.4.0)
+    # RGB command
     rgb_parser = subparsers.add_parser('rgb', help='Control keyboard RGB lighting')
     rgb_subparsers = rgb_parser.add_subparsers(dest='rgb_command', help='RGB commands')
     rgb_subparsers.add_parser('status', help='Show current state and active profile')
@@ -1536,7 +1598,12 @@ Run 'openomen <command> -w' to watch in real-time.
     rgb_subparsers.add_parser('off', help='Turn keyboard lights off')
 
     subparsers.add_parser('doctor', help='Check hardware compatibility and driver status')
-    subparsers.add_parser('update', help='Update OpenOMEN to the latest version')
+    
+    # Update command with force and verification toggle arguments
+    update_parser = subparsers.add_parser('update', help='Update OpenOMEN to the latest version')
+    update_parser.add_argument('-f', '--force', action='store_true', help='Force direct update download from releases/latest/download')
+    update_parser.add_argument('--no-verify', action='store_false', dest='verify', help='Disable post-download version execution verification')
+
     parser.add_argument('-v', '--version', action='version', version=f'%(prog)s {VERSION}')
 
     args = parser.parse_args()
@@ -1628,7 +1695,7 @@ Run 'openomen <command> -w' to watch in real-time.
         return 0
 
     elif args.command == 'update':
-        return 0 if update_openomen() else 1
+        return 0 if update_openomen(force=args.force, verify=args.verify) else 1
 
     return 0
 
