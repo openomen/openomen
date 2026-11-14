@@ -30,7 +30,7 @@ import contextlib
 import shutil
 import ssl
 
-VERSION = "0.4.2"
+VERSION = "0.4.3"
 APP_NAME = "OpenOMEN CLI"
 
 CLEAR_SCREEN = "\033[2J\033[H"
@@ -112,11 +112,15 @@ def check_root():
 
 def ensure_root():
     if not check_root():
-        import sys
         # PyInstaller sets sys.executable to the actual binary path
         script_path = sys.executable if getattr(sys, 'frozen', False) else os.path.abspath(sys.argv[0])
         args = ['sudo', script_path] + sys.argv[1:]
-        os.execvp('sudo', args)
+        try:
+            os.execvp('sudo', args)
+        except FileNotFoundError:
+            print("Error: this command needs root, but 'sudo' was not found.", file=sys.stderr)
+            print("Run it as root instead (e.g. 'su -c \"openomen ...\"').", file=sys.stderr)
+            sys.exit(1)
 
 def read_fan_boost_status():
     """ reads it from pwm1_enable file earlier """
@@ -199,21 +203,22 @@ def toggle_fan_boost():
 
 def get_friendly_label(label):
     """ Convert technical hwmon labels to userfriendly names, better for everyone """
+    # Keys are lowercase: read_hwmon_temps lowercases labels before they get here.
     label_mapping = {
-        'edge': 'CPU',
-        'Tccd1': 'CPU CCD1',
-        'Tccd2': 'CPU CCD2',
-        'Tctl': 'CPU Control',
-        'Tdie': 'CPU Die',
-        'Package id 0': 'CPU Package',
-        'Composite': 'CPU Composite',
+        'edge': 'GPU Edge',  # amdgpu edge sensor; this is a GPU temperature, not the CPU
+        'tccd1': 'CPU CCD1',
+        'tccd2': 'CPU CCD2',
+        'tctl': 'CPU Control',
+        'tdie': 'CPU Die',
+        'package id 0': 'CPU Package',
+        'composite': 'CPU Composite',
         'temp1': 'System',
         'temp2': 'CPU',
         'temp3': 'GPU',
     }
-    
+
     # Return mapped label or original if not found
-    return label_mapping.get(label, label)
+    return label_mapping.get(label.lower(), label)
 
 
 # Proper temperature reading function
@@ -419,10 +424,12 @@ def get_amd_driver_info(card_device_dir):
         pass
     return "AMD Kernel Driver"
 
-def read_gpu_stats():
+def read_gpu_stats(quiet_missing=False):
     """
     Read GPU temperature, utilization, and specs across multi-GPU setups.
     Supports NVIDIA (nvidia-smi), AMD (sysfs/drm), and Intel (sysfs/drm/iGPU/Arc).
+    quiet_missing: print a plain "No GPU detected" line to stdout instead of an error
+    on stderr (used by dashboards, where a missing GPU is not a failure).
     """
     gpus_found = 0
 
@@ -510,7 +517,9 @@ def read_gpu_stats():
                         pass
 
                 # Frequency lookup (i915/xe)
-                freq_file = os.path.join(card_dir, "drm/card0/gt_cur_freq_mhz")
+                # card_dir is /sys/class/drm/cardN/device, so the i915 freq file
+                # lives next to it in cardN/, not under a hardcoded card0.
+                freq_file = os.path.join(os.path.dirname(card_dir), "gt_cur_freq_mhz")
                 if not os.path.exists(freq_file):
                     freq_file = glob.glob(os.path.join(card_dir, "gt*/freq0/act_freq"))
                     freq_file = freq_file[0] if freq_file else None
@@ -531,7 +540,10 @@ def read_gpu_stats():
         print(f"Error reading sysfs GPU stats: {e}", file=sys.stderr)
 
     if gpus_found == 0:
-        print("Error: No GPU found (nvidia-smi unavailable, no AMD/Intel hwmon).", file=sys.stderr)
+        if quiet_missing:
+            print("No GPU detected.")
+        else:
+            print("Error: No GPU found (nvidia-smi unavailable, no AMD/Intel hwmon).", file=sys.stderr)
         return False
 
     return True
@@ -573,7 +585,8 @@ def read_all_stats():
     print()
     
     print("─── GPU ──────────────────────────")
-    read_gpu_stats()
+    read_gpu_stats(quiet_missing=True)
+    return True
 
 def read_system_info():
     """
@@ -826,6 +839,121 @@ def apply_combined_profile(name):
 
     return success
 
+def is_nixos():
+    """ Detect whether we're running on NixOS. """
+    if os.path.exists("/etc/NIXOS"):
+        return True
+    try:
+        with open("/etc/os-release", "r") as f:
+            content = f.read()
+        return re.search(r'^ID=nixos\s*$', content, re.MULTILINE) is not None
+    except IOError:
+        return False
+
+
+def find_nix_dynamic_linker():
+    """
+    NixOS has no /lib64/ld-linux-x86-64.so.2, so a generic prebuilt Linux
+    binary can't be exec'd as-is (the kernel returns ENOENT for the missing
+    interpreter, which looks exactly like "file not found").
+
+    We find a *working* interpreter + lib directory by asking patchelf what
+    interpreter an existing, already-working dynamic binary on this system
+    uses (NixOS binaries are still dynamically linked, just against an
+    interpreter that lives in /nix/store/.../glibc-.../lib/).
+    """
+    patchelf = shutil.which("patchelf")
+    if not patchelf:
+        return None, None
+
+    candidates = [
+        "/run/current-system/sw/bin/bash",
+        "/run/current-system/sw/bin/sh",
+        shutil.which("bash"),
+        shutil.which("sh"),
+    ]
+    for candidate in candidates:
+        if not candidate or not os.path.exists(candidate):
+            continue
+        try:
+            result = subprocess.run(
+                [patchelf, "--print-interpreter", candidate],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                interpreter = result.stdout.strip()
+                lib_dir = os.path.dirname(interpreter)
+                return interpreter, lib_dir
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            continue
+    return None, None
+
+
+def find_nix_ld_loader():
+    """
+    If nix-ld is installed/enabled (programs.nix-ld.enable = true;), it
+    exposes a working dynamic linker we can invoke the downloaded binary
+    through directly, without needing to patch the file at all.
+    """
+    nix_ld = os.environ.get("NIX_LD")
+    if nix_ld and os.path.exists(nix_ld):
+        return nix_ld
+    for candidate in glob.glob("/run/current-system/sw/share/nix-ld/lib/ld*.so*"):
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
+def patch_binary_for_nixos(binary_path):
+    """
+    Patch a generic prebuilt Linux binary's ELF interpreter + rpath so it can
+    run on NixOS. Requires `patchelf` on PATH (e.g. `nix-shell -p patchelf`,
+    or add patchelf to environment.systemPackages).
+    Returns True on success, False if patchelf/interpreter unavailable.
+    """
+    patchelf = shutil.which("patchelf")
+    if not patchelf:
+        return False
+
+    interpreter, lib_dir = find_nix_dynamic_linker()
+    if not interpreter:
+        return False
+
+    try:
+        subprocess.run([patchelf, "--set-interpreter", interpreter, binary_path],
+                        check=True, timeout=10, capture_output=True)
+        subprocess.run([patchelf, "--set-rpath", lib_dir, binary_path],
+                        check=True, timeout=10, capture_output=True)
+        return True
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return False
+
+
+def make_binary_runnable_on_nixos(binary_path):
+    """
+    Best-effort attempt to make a downloaded prebuilt binary executable on
+    NixOS, trying nix-ld first (no modification needed), then patchelf.
+    Returns a tuple (runner_prefix, patched) where runner_prefix is a list
+    to prepend to the exec argv (empty if the binary can be run directly),
+    and patched indicates whether the file itself was modified.
+    """
+    nix_ld = find_nix_ld_loader()
+    if nix_ld:
+        print(f"Detected nix-ld ({nix_ld}) — running downloaded binary through it.")
+        return [nix_ld], False
+
+    if patch_binary_for_nixos(binary_path):
+        print("Patched downloaded binary's ELF interpreter/rpath for NixOS compatibility.")
+        return [], True
+
+    print("Warning: could not make the downloaded binary runnable on NixOS.")
+    print("Install patchelf (`nix-shell -p patchelf` or add it to")
+    print("environment.systemPackages) for automatic patching, or enable")
+    print("nix-ld (`programs.nix-ld.enable = true;`) for the smoothest experience.")
+    print("See: https://github.com/nix-community/nix-ld")
+    return [], False
+
+
 def get_install_path():
     """
     Dynamically chooses the best installation path for openomen
@@ -847,6 +975,23 @@ def get_install_path():
         return os.path.join(user_bin, "openomen")
         
     return os.path.join(system_bin, "openomen")
+
+def get_binary_version(path, runner_prefix=None):
+    """
+    Ask an openomen binary for its version via '--version' (output: 'openomen X.Y.Z').
+    Falls back to scraping 'V X.Y.Z' from the help text for binaries older than that
+    check. Returns the version string, or None if it could not be determined.
+    Raises FileNotFoundError / subprocess.TimeoutExpired like subprocess.run.
+    """
+    cmd = (runner_prefix or []) + [path]
+    result = subprocess.run(cmd + ['--version'], capture_output=True, text=True, timeout=5)
+    match = re.search(r'(\d+\.\d+\.\d+)', result.stdout)
+    if match:
+        return match.group(1)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+    match = re.search(r'V(\d+\.\d+\.\d+)', result.stdout)
+    return match.group(1) if match else None
+
 
 def update_openomen(force=False, verify=True):
     """ 
@@ -888,19 +1033,12 @@ def update_openomen(force=False, verify=True):
             # Check local current version
             if os.path.exists(INSTALL_PATH):
                 try:
-                    result = subprocess.run([INSTALL_PATH], capture_output=True, text=True, timeout=5)
-                    current_version_match = None
-                    for line in result.stdout.split('\n'):
-                        if 'V' in line and any(c.isdigit() for c in line):
-                            match = re.search(r'V(\d+\.\d+\.\d+)', line)
-                            if match:
-                                current_version_match = match.group(1)
-                                break
-                    
+                    current_version_match = get_binary_version(INSTALL_PATH)
+
                     if current_version_match:
                         print(f"Current Version: v{current_version_match}")
                         if current_version_match == latest_version_clean:
-                            print("\nYou already have the latest version! Use '--force' to reinstall anyway.")
+                            print("\nYou already have the latest version! Use '-f' / '--force' to reinstall anyway.")
                             return True
                     else:
                         print("Current Version: Unable to detect version")
@@ -932,18 +1070,17 @@ def update_openomen(force=False, verify=True):
 
             os.chmod(tmp_path, 0o755)
 
+            nixos = is_nixos()
+            runner_prefix = []
+            if nixos:
+                print("NixOS detected — checking binary compatibility...")
+                runner_prefix, _patched = make_binary_runnable_on_nixos(tmp_path)
+
             if verify:
                 print("Verifying binary execution...")
                 try:
-                    result = subprocess.run([tmp_path], capture_output=True, text=True, timeout=5)
-                    downloaded_version_match = None
-                    for line in result.stdout.split('\n'):
-                        if 'V' in line and any(c.isdigit() for c in line):
-                            match = re.search(r'V(\d+\.\d+\.\d+)', line)
-                            if match:
-                                downloaded_version_match = match.group(1)
-                                break
-                    
+                    downloaded_version_match = get_binary_version(tmp_path, runner_prefix)
+
                     if not force and latest_version_clean:
                         if not downloaded_version_match or downloaded_version_match != latest_version_clean:
                             print("ERROR: Downloaded binary version verification failed.")
@@ -953,15 +1090,30 @@ def update_openomen(force=False, verify=True):
                     print("ERROR: Downloaded binary execution test failed.")
                     os.unlink(tmp_path)
                     return False
+                except FileNotFoundError:
+                    if nixos:
+                        print("ERROR: Binary still can't execute on NixOS after patching attempt.")
+                        print("Try: nix-shell -p patchelf, or enable programs.nix-ld.enable = true;")
+                    else:
+                        print("ERROR: Downloaded binary execution test failed (executable missing).")
+                    os.unlink(tmp_path)
+                    return False
             else:
                 print("Skipping post-download validation check (--no-verify set).")
 
             print(f"Installing binary to '{INSTALL_PATH}'...")
             
             if needs_sudo:
-                subprocess.run(['sudo', 'rm', '-f', INSTALL_PATH], check=True)
-                subprocess.run(['sudo', 'mv', tmp_path, INSTALL_PATH], check=True)
+                # 'install -D' creates any missing parent directories (e.g. a
+                # nonexistent /usr/local/bin on NixOS) and does the copy +
+                # chmod atomically in one privileged step, instead of a
+                # separate rm/mv pair that assumes the target directory and
+                # tmp filesystem are both reachable the same way to sudo.
+                subprocess.run(['sudo', 'install', '-Dm755', tmp_path, INSTALL_PATH], check=True)
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
             else:
+                os.makedirs(INSTALL_DIR, exist_ok=True)
                 if os.path.exists(INSTALL_PATH):
                     os.remove(INSTALL_PATH)
                 shutil.move(tmp_path, INSTALL_PATH)
@@ -1275,7 +1427,9 @@ def run_doctor():
 
     print(f"\nDoctor complete: {passed} passed, {failed} failed.")
 
-def monitor_stats_loop(interval=1.5):
+def monitor_stats_loop(render=None, interval=1.5):
+    """Redraw `render` (default: the full dashboard) every `interval` seconds."""
+    render = render or read_all_stats
     try:
         while True:
             sys.stdout.write(CLEAR_SCREEN)
@@ -1283,7 +1437,7 @@ def monitor_stats_loop(interval=1.5):
             sys.stdout.flush()
             print("=== OpenOMEN Monitor Mode (Ctrl+C to exit) ===")
             print()
-            read_all_stats()
+            render()
             time.sleep(interval)
     except KeyboardInterrupt:
         pass
@@ -1300,7 +1454,42 @@ def monitor_stats_loop(interval=1.5):
 # If you have a supported device and want to help, see the
 # Discord: https://discord.gg/UHQ5cztbUj
 # ============================================================
-RGB_CONFIG_DIR = os.path.expanduser("~/.config/openomen/rgb")
+def _real_user_home():
+    """
+    Home directory of the user who invoked openomen. Under sudo, '~' resolves to
+    /root, so prefer SUDO_USER's home to keep RGB profiles and state in one place.
+    """
+    sudo_user = os.environ.get("SUDO_USER")
+    if check_root() and sudo_user and sudo_user != "root":
+        try:
+            import pwd
+            return pwd.getpwnam(sudo_user).pw_dir
+        except (ImportError, KeyError):
+            pass
+    return os.path.expanduser("~")
+
+def _chown_to_real_user(path):
+    """Best effort: hand files created while root over to the invoking user."""
+    sudo_user = os.environ.get("SUDO_USER")
+    if not (check_root() and sudo_user and sudo_user != "root"):
+        return
+    try:
+        import pwd
+        pw = pwd.getpwnam(sudo_user)
+        os.chown(path, pw.pw_uid, pw.pw_gid)
+    except (ImportError, KeyError, OSError):
+        pass
+
+def normalize_hex_color(value):
+    """Return a 6-digit uppercase hex string for '#RRGGBB'/'RRGGBB', or None if invalid."""
+    if not isinstance(value, str):
+        return None
+    value = value.strip().lstrip("#")
+    if re.fullmatch(r"[0-9a-fA-F]{6}", value):
+        return value.upper()
+    return None
+
+RGB_CONFIG_DIR = os.path.join(_real_user_home(), ".config/openomen/rgb")
 RGB_PROFILES_DIR = os.path.join(RGB_CONFIG_DIR, "profiles")
 RGB_STATE_PATH = os.path.join(RGB_CONFIG_DIR, "state.json")
 
@@ -1353,16 +1542,17 @@ DEFAULT_RGB_PROFILES = {
 }
 
 def ensure_rgb_config():
-    if not os.path.exists(RGB_CONFIG_DIR):
-        os.makedirs(RGB_CONFIG_DIR, exist_ok=True)
-    if not os.path.exists(RGB_PROFILES_DIR):
-        os.makedirs(RGB_PROFILES_DIR, exist_ok=True)
+    for d in (RGB_CONFIG_DIR, RGB_PROFILES_DIR):
+        if not os.path.exists(d):
+            os.makedirs(d, exist_ok=True)
+            _chown_to_real_user(d)
     for profile_id, data in DEFAULT_RGB_PROFILES.items():
         profile_path = os.path.join(RGB_PROFILES_DIR, f"{profile_id}.json")
         if not os.path.exists(profile_path):
             try:
                 with open(profile_path, 'w') as f:
                     json.dump(data, f, indent=4)
+                _chown_to_real_user(profile_path)
             except IOError as e:
                 print(f"Warning: Failed to create default profile: {e}", file=sys.stderr)
 
@@ -1381,6 +1571,7 @@ def write_rgb_state(state):
     try:
         with open(RGB_STATE_PATH, 'w') as f:
             json.dump(state, f, indent=4)
+        _chown_to_real_user(RGB_STATE_PATH)
         return True
     except IOError as e:
         print(f"Error: Could not save state file: {e}", file=sys.stderr)
@@ -1443,12 +1634,20 @@ def apply_rgb_hardware(profile):
             for i in range(4):
                 key = str(i)
                 if key in profile["zones"]:
-                    colors[i] = profile["zones"][key].replace("#", "").upper()
+                    color = normalize_hex_color(profile["zones"][key])
+                    if color is None:
+                        print(f"Error: invalid color '{profile['zones'][key]}' for zone {i} "
+                              "(expected #RRGGBB).", file=sys.stderr)
+                        return False
+                    colors[i] = color
         else:
             fallback_color = "000000"
             animation = profile.get("animation", {})
             if "full" in animation and "0" in animation["full"]:
-                fallback_color = animation["full"]["0"].replace("#", "").upper()
+                fallback_color = normalize_hex_color(animation["full"]["0"])
+                if fallback_color is None:
+                    print(f"Error: invalid color '{animation['full']['0']}' (expected #RRGGBB).", file=sys.stderr)
+                    return False
             colors = [fallback_color] * 4
 
     try:
@@ -1532,7 +1731,7 @@ def rgb_set(profile_id):
         return False
     print(f"RGB Profile set to {profile.get('name', profile_id)}")
     if state.get("enabled"):
-        apply_rgb_hardware(profile)
+        return apply_rgb_hardware(profile)
     return True
 
 def rgb_power(on):
@@ -1545,18 +1744,20 @@ def rgb_power(on):
         active = state.get("active_profile")
         profile = load_rgb_profile(active) if active else None
         if profile:
-            apply_rgb_hardware(profile)
+            if not apply_rgb_hardware(profile):
+                return False
             print(f"Keyboard lights on (profile: {profile.get('name', active)})")
         else:
             print("Keyboard lights on (no active profile set — run 'openomen rgb set <name>')")
     else:
-        apply_rgb_hardware(None)
+        if not apply_rgb_hardware(None):
+            return False
         print("Keyboard lights off")
     return True
 
 def main():
     parser = argparse.ArgumentParser(
-        description="CLI tool for controlling fan behavior on HP OMEN/Victus laptops - V0.4.2 - audixdev",
+        description=f"CLI tool for controlling fans, power and RGB on HP OMEN/Victus laptops - V{VERSION} - audixdev",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Commands: fan, cpu, gpu, stats, info, power, rgb, doctor, update
@@ -1571,13 +1772,13 @@ Run 'openomen <command> -w' to watch in real-time.
     fan_subparsers.add_parser('auto', help='Auto/BIOS control')
     fan_subparsers.add_parser('toggle', help='Toggle fan max on/off')
     fan_status_parser = fan_subparsers.add_parser('status', help='Show current fan status')
-    fan_status_parser.add_argument('-w', '--watch', action='store_true', help='Update every 2 seconds (exit with Ctrl+C)')
+    fan_status_parser.add_argument('-w', '--watch', action='store_true', help='Refresh every 1.5 seconds (exit with Ctrl+C)')
     cpu_parser = subparsers.add_parser('cpu', help='Read current CPU stats')
-    cpu_parser.add_argument('-w', '--watch', action='store_true', help='Update every 2 seconds (exit with Ctrl+C)')
+    cpu_parser.add_argument('-w', '--watch', action='store_true', help='Refresh every 1.5 seconds (exit with Ctrl+C)')
     gpu_parser = subparsers.add_parser('gpu', help='Read current GPU stats')
-    gpu_parser.add_argument('-w', '--watch', action='store_true', help='Update every 2 seconds (exit with Ctrl+C)')
+    gpu_parser.add_argument('-w', '--watch', action='store_true', help='Refresh every 1.5 seconds (exit with Ctrl+C)')
     stats_parser = subparsers.add_parser('stats', help='Print snapshot of all systems')
-    stats_parser.add_argument('-w', '--watch', action='store_true', help='Update every 2 seconds (exit with Ctrl+C)')
+    stats_parser.add_argument('-w', '--watch', action='store_true', help='Refresh every 1.5 seconds (exit with Ctrl+C)')
     subparsers.add_parser('info', help='Display diagnostic layout parameters')
     power_parser = subparsers.add_parser('power', help='Manage power configurations')
     power_subparsers = power_parser.add_subparsers(dest='power_command', help='Power commands')
@@ -1626,26 +1827,29 @@ Run 'openomen <command> -w' to watch in real-time.
             return 0 if toggle_fan_boost() else 1
         elif args.fan_command == 'status':
             if args.watch:
-                monitor_stats_loop()
+                monitor_stats_loop(read_fan_status)
                 return 0
             else:
                 return 0 if read_fan_status() else 1
 
     elif args.command == 'cpu':
         if args.watch:
-            monitor_stats_loop()
+            monitor_stats_loop(read_cpu_stats)
             return 0
         else:
             return 0 if read_cpu_stats() else 1
 
     elif args.command == 'gpu':
         if args.watch:
-            monitor_stats_loop()
+            monitor_stats_loop(read_gpu_stats)
             return 0
         else:
             return 0 if read_gpu_stats() else 1
 
     elif args.command == 'stats':
+        if args.watch:
+            monitor_stats_loop(read_all_stats)
+            return 0
         read_all_stats()
         return 0
 
@@ -1690,7 +1894,9 @@ Run 'openomen <command> -w' to watch in real-time.
             return 0 if rgb_power(False) else 1
 
     elif args.command == 'doctor':
-        ensure_root()
+        # Doctor only reads state, so it runs unprivileged; some checks may be less complete.
+        if not check_root():
+            print("Note: running without root; some checks may be incomplete (try sudo).\n")
         run_doctor()
         return 0
 

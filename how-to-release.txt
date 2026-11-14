@@ -60,7 +60,7 @@ The compiled binary will be located at:
 This is the standalone executable for Linux.
 
 ------------------------------------------------------------
-7. NOTES
+6. NOTES
 ------------------------------------------------------------
 
 - The binary is Linux-specific (not cross-platform)
