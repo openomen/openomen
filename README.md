@@ -63,6 +63,7 @@ The following devices have been tested and confirmed to work without model-speci
 | Victus 16 16-r0xxx   |   ✅   | Confirmed working, supported since v0.1       |
 | Victus 15 15-fb0xxx  |   ✅   | Confirmed working, supported since v0.1       |
 | HP OMEN X 2S         |   ✅   | Confirmed working, supported since v0.1       |
+| HP OMEN 15           |   ✅   | Confirmed working, supported since v0.4       |
 | HP OMEN 17           |   ✅   | Confirmed working, supported since v0.1       |
 | HP OMEN 16           |   ✅   | Confirmed working, supported since v0.1       |
 
