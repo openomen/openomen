@@ -116,7 +116,12 @@ def make_binary_runnable_on_nixos(binary_path, out=print):
     nix_ld = find_nix_ld_loader()
     if nix_ld:
         out(f"Detected nix-ld ({nix_ld}) — running downloaded binary through it.")
-        return [nix_ld], False
+        # Invoked directly, this loader doesn't read NIX_LD_LIBRARY_PATH (only the
+        # nix-ld shim does), and LD_LIBRARY_PATH is cleared for child processes of
+        # the frozen binary. Without an explicit library path the PyInstaller
+        # bootloader can't find libz.so.1 and the version check sees no output.
+        lib_path = os.environ.get("NIX_LD_LIBRARY_PATH") or os.path.dirname(nix_ld)
+        return [nix_ld, "--library-path", lib_path], False
 
     if patch_binary_for_nixos(binary_path):
         out("Patched downloaded binary's ELF interpreter/rpath for NixOS compatibility.")
@@ -313,11 +318,13 @@ def dir_needs_sudo(directory):
     return not os.access(probe, os.W_OK)
 
 
-def get_binary_version(path, runner_prefix=None):
+def get_binary_version(path, runner_prefix=None, stderr_lines=None):
     """
     Ask an openomen binary for its version via '--version' (output: 'openomen X.Y.Z').
     Falls back to scraping 'V X.Y.Z' from the help text for binaries older than that
     check. Returns a (major, minor, patch) tuple, or None if it could not be determined.
+    When it can't, the binary's stderr lines are appended to `stderr_lines` (if given),
+    so the caller can show why (e.g. a missing shared library).
     Raises OSError / subprocess.TimeoutExpired like subprocess.run.
     """
     cmd = (runner_prefix or []) + [path]
@@ -325,9 +332,14 @@ def get_binary_version(path, runner_prefix=None):
     version = parse_version(result.stdout)
     if version:
         return version
+    first_stderr = result.stderr
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
     match = re.search(r'V(\d+\.\d+\.\d+)', result.stdout)
-    return parse_version(match.group(1)) if match else None
+    if match:
+        return parse_version(match.group(1))
+    if stderr_lines is not None:
+        stderr_lines.extend(line for line in (first_stderr or result.stderr).strip().splitlines() if line.strip())
+    return None
 
 
 def install_binary(src_path, install_path, needs_sudo):
@@ -439,8 +451,9 @@ def update_openomen(force=False, verify=True, out=print):
 
         if verify:
             out("Verifying binary execution...")
+            run_errors = []
             try:
-                downloaded_version = get_binary_version(tmp_path, runner_prefix)
+                downloaded_version = get_binary_version(tmp_path, runner_prefix, run_errors)
             except subprocess.TimeoutExpired:
                 raise UpdateError("Downloaded binary execution test timed out.")
             except OSError as e:
@@ -450,7 +463,9 @@ def update_openomen(force=False, verify=True, out=print):
                 raise UpdateError(f"Downloaded binary could not be executed ({e}). "
                                   "If /tmp is mounted noexec, set TMPDIR to another directory.")
             if downloaded_version is None:
-                raise UpdateError("Downloaded binary did not report a version.")
+                detail = ("\nIt printed: " + "\n  ".join(run_errors[:5])) if run_errors else ""
+                raise UpdateError("Downloaded binary did not report a version." + detail +
+                                  "\nUse '--no-verify' to skip this check (the checksum is still verified).")
             if expected_version and downloaded_version != expected_version:
                 raise UpdateError(f"Downloaded binary reports {format_version(downloaded_version)}, "
                                   f"expected {format_version(expected_version)}.")
