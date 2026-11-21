@@ -60,7 +60,19 @@ The compiled binary will be located at:
 This is the standalone executable for Linux.
 
 ------------------------------------------------------------
-6. NOTES
+6. PUBLISH ON GITHUB (what `openomen update` expects)
+------------------------------------------------------------
+
+- Tag the release CLI_X.Y.Z (or vX.Y.Z / X.Y.Z), matching VERSION in the script.
+  The updater refuses a binary whose `--version` differs from the tag.
+- Upload the binary as an asset named exactly: openomen
+- Don't mark it as a pre-release; pre-releases and drafts are skipped.
+- Checksums: GitHub publishes a SHA-256 digest for every uploaded asset, and the
+  updater verifies it automatically. Optionally also upload `openomen.sha256`
+  (output of `sha256sum dist/openomen`), which `update -f` uses.
+
+------------------------------------------------------------
+7. NOTES
 ------------------------------------------------------------
 
 - The binary is Linux-specific (not cross-platform)
