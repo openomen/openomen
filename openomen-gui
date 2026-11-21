@@ -1,0 +1,24 @@
+#!/usr/bin/env python3
+"""
+OpenOMEN Control Center - GUI for controlling fans, power and RGB on HP OMEN/Victus laptops
+audixdev - (C) Copyright 2026 - GPL-3.0 License
+
+“OMEN” and "Victus" are trademarks of HP Inc., and any references to it in this project are strictly for the purpose of device compatibility and identification.
+This software is provided "as is", without warranty of any kind. Use this software at your own risk.
+
+Entry point only: the GUI lives in src/openomen/gui and needs PySide6.
+On NixOS run it from the repo with:  nix-shell --run ./openomen-gui
+Release binaries are built with PyInstaller (see openomen-gui.spec).
+"""
+
+import os
+import sys
+
+_SRC = os.path.join(os.path.dirname(os.path.realpath(__file__)), "src")
+if os.path.isdir(_SRC):
+    sys.path.insert(0, _SRC)
+
+from openomen.gui.app import main  # noqa: E402
+
+if __name__ == '__main__':
+    sys.exit(main())

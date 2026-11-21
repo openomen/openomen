@@ -112,6 +112,17 @@ def resolve_combined_profile(name):
     return name, acpi_profile, fan_mode
 
 
+def current_combined_profile(acpi_profile, fan_mode):
+    """
+    Name of the combined profile the given state matches ('gaming', ...), or None.
+    `fan_mode` is 'max' / 'auto' as returned by fans.get_fan_status().
+    """
+    for name, (preferred, profile_fan_mode) in COMBINED_PROFILES.items():
+        if acpi_profile in preferred and fan_mode == profile_fan_mode:
+            return name
+    return None
+
+
 def apply_combined_profile(name):
     """
     Apply a combined profile (power mode + fan mode). Needs root.

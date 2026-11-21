@@ -53,6 +53,16 @@ one-off command is:
 
     pyinstaller --onefile --name openomen --paths src openomen
 
+GUI binary (gui branch, read-only preview for now):
+
+    pip install PySide6
+    pyinstaller openomen-gui.spec     # -> dist/openomen-gui (~45 MB)
+
+Running the GUI from source on NixOS (pip's Qt wheels need libraries NixOS
+doesn't provide, so use the dev shell with PySide6 from nixpkgs):
+
+    nix-shell --run ./openomen-gui
+
 Code layout:
 
     openomen               entry script (also runnable directly from a checkout)
@@ -67,6 +77,7 @@ Code layout:
 The compiled binary will be located at:
 
     dist/openomen
+    dist/openomen-gui
 
 This is the standalone executable for Linux.
 
