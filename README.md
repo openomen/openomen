@@ -34,16 +34,18 @@ Planned features include:
 
 > OpenOMEN is community-maintained and not affiliated with HP. See the [Disclaimer](#disclaimer) below.
 
+> If you're looking for information on usage, see the [Usage](#usage) section below.
+
 ---
 
 ## Table of Contents
 
 - [Supported Devices](#supported-devices)
-- [Supported Distributions](#supported-linux-distributions)
+- [Supported Linux Distributions](#supported-linux-distributions)
 - [Installation](#installation)
-- [Usage](#usage)
 - [Updating](#updating)
 - [Uninstalling](#uninstalling)
+- [Usage](#usage)
 - [Contributing](#contributing)
 - [Support & Community](#support--community)
 - [FAQ](#faq)
@@ -56,41 +58,50 @@ Planned features include:
 
 The following devices have been tested and confirmed to work without model-specific issues:
 
-| Device               | Status | Notes                                       |
-|----------------------|:------:|----------------------------------------------|
-| Victus 17 17z-db100  |   ✅   | Confirmed working, supported since v0.1       |
-| Victus 16 16-ap0xxx  |   ✅   | Confirmed working, supported since v0.1       |
-| Victus 16 16-r0xxx   |   ✅   | Confirmed working, supported since v0.1       |
-| Victus 15 15-fb0xxx  |   ✅   | Confirmed working, supported since v0.1       |
-| HP OMEN X 2S         |   ✅   | Confirmed working, supported since v0.1       |
-| HP OMEN 15           |   ✅   | Confirmed working, supported since v0.4       |
-| HP OMEN 17           |   ✅   | Confirmed working, supported since v0.1       |
-| HP OMEN 16           |   ✅   | Confirmed working, supported since v0.1       |
+| Device               | Status | Support     | Notes     |
+|----------------------|:------:|-------------|-----------|
+| Victus 17 17z-db100  |   ✅   | Since v0.1 |            |
+| Victus 16 16-ap0xxx  |   ✅   | Since v0.1 |            |
+| Victus 16 16-r0xxx   |   ✅   | Since v0.1 |            |
+| Victus 15 15-fb0xxx  |   ✅   | Since v0.1 |            |
+| HP OMEN X 2S         |   ✅   | Since v0.1 |            |
+| HP OMEN 15           |   ✅   | Since v0.1 |            |
+| HP OMEN 17           |   ✅   | Since v0.1 |            |
+| HP OMEN 16           |   ✅   | Since v0.1 |            |
 
 Most HP OMEN / Victus laptops share similar embedded-controller architectures, so devices outside this list often work too but this isn't guaranteed, since firmware varies by model.
 
-**Don't see your device?** Try it and [let us know](https://github.com/openomen/openomen/issues) how it went so we can add it to the list if working or not.
+**Don't see your device?** Test it and [let us know](https://github.com/openomen/openomen/issues) how it works so we can update the list!
 
 ---
 
 ## Supported Linux Distributions
 
-OpenOMEN has been tested on **Linux 6.18+**, on:
+OpenOMEN has been tested on **Linux 5.14 to Linux 7.1**, on:
 
-- Arch Linux (7.0.10-arch1-1)
+- Arch Linux
 - NixOS 26.05
-- Ubuntu (22.04 / 24.04)
+- Ubuntu (22/24/26 LTS)
 - CachyOS
 
-It should also work on most other Debian-based distributions, as long as the required dependencies are available.
+It should also work on most distributions, as long as the required dependencies are available, like the `hp-wmi` library. For Power Profiles, your kernel must support `platform_profile` (Linux 5.17+).
+
+Use `openomen doctor` to test your computer's and kernel's capabilities.
 
 ---
 
 ## Installation
 
-Full instructions live on the [Installation & Updating wiki page](https://github.com/openomen/openomen/wiki), but the quick version:
+### Automated Installation
+On your terminal, run:
+```bash
+curl -fsSL https://raw.githubusercontent.com/openomen/openomen/main/install.sh | sudo bash
+```
 
-1. Grab the latest binary from the [Releases page](https://github.com/openomen/openomen/releases/latest).
+This will automatically install the latest **OpenOMEN Release Binary** to `/usr/local/bin`.
+
+## Manual Install
+1. Get **OpenOMEN's** [Latest Release](https://github.com/openomen/openomen/releases/latest).
 2. Download the release file (`openomen`).
 3. Move it to a directory on your `$PATH`, typically `/usr/local/bin`:
    ```bash
@@ -106,27 +117,32 @@ You're now ready to run `openomen` from anywhere in your terminal.
 
 ---
 
-## Usage
-
-See the [Usage wiki page](https://github.com/openomen/openomen/wiki/%F0%9F%92%BF-Usage) for the full CLI reference, examples, and configuration options.
-
----
-
 ## Updating
 
-Update in place with:
-
+You can directly update **OpenOMEN** by running:
 ```bash
 openomen update
 ```
 
-Or manually, by downloading the latest release and replacing your existing `openomen` binary.
+If you seem to have connection or certificate issues, you can, as a last resource, use the `--force` parameter at your own risk.
+
+To manually update **OpenOMEN**, download the latest release's binary and replace your existing binary. (If **OpenOMEN** is in your path, you can use `which openomen` to find it.)
 
 ---
 
 ## Uninstalling
 
-See the [Uninstall wiki page](https://github.com/openomen/openomen/wiki/%E2%9D%8C-Uninstall) for full removal steps, including cleaning up any daemon/service files.
+Uninstalling **OpenOMEN** only requires deleting the original binary. (In automated installs, located in `/usr/local/bin/openomen`).
+
+If you want to also delete your configuration (not neccesary, less than a megabyte), it is located in `~/.config/openomen`, so different users may have each own configuration.
+
+---
+
+## Usage
+
+**OpenOMEN** has a variety of commands that allow for different operations.
+
+For a detailed guide on all of them, see the [Usage Guide](USAGE.md)
 
 ---
 
@@ -134,7 +150,7 @@ See the [Uninstall wiki page](https://github.com/openomen/openomen/wiki/%E2%9D%8
 
 Contributions are welcome and appreciated, whether that's code, documentation, bug reports, or testing on new hardware.
 
-1. Fork the repository
+1. Fork or Clone the repository
 2. Create a feature branch (`git checkout -b feature/my-feature`)
 3. Commit your changes
 4. Open a Pull Request describing what you changed and why
@@ -149,13 +165,27 @@ Bug reports and feature requests are just as valuable as code, please [open an i
 
 - 🐛 **Bugs & feature requests:** [open an issue](https://github.com/openomen/openomen/issues)
 - 💬 **Chat, help, and discussion:** [join the Discord server](https://discord.gg/UHQ5cztbUj)
-- 📖 **Documentation:** [check the Wiki](https://github.com/openomen/openomen/wiki)
 
 ---
 
 ## FAQ
 
-Common questions are answered on the [Support & FAQ wiki page](https://github.com/openomen/openomen/wiki/%F0%9F%92%AC-Support-&-FAQ).
+**How does OpenOMEN work?**<br>
+Openomen uses the integrated `hp-wmi` library built inside Linux to manage your `HP OMEN/Victus's` Embedded Controller (EC) that manages your fans, keyboard lighting, power profiles and more.
+
+<br>**What files does OpenOMEN create?**<br>
+**OpenOMEN** has every feature embedded into a single binary and only creates `~/.config/openomen` on your user folder when saving data such as your keybord RGB profiles.
+
+<br>**Is OpenOMEN safe to use?**<br>
+**OpenOMEN** does not obtain any data and doesn't use an Internet connection. But, some devices could suffer problems when interacting with the Embedded Controller. If this happens, you can report it and obtain support on the [Discord server](https://discord.gg/UHQ5cztbUj).
+
+---
+
+## License
+
+**OpenOMEN** is a free, *open-source* project under the **GPL-3.0 License.**
+
+See the `LICENSE` file included within this source code folder, if no copy of it has been provided, you can obtain a copy at <https://www.gnu.org/licenses/gpl-3.0.html>.
 
 ---
 
