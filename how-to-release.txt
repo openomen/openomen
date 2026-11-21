@@ -45,9 +45,20 @@ Install PyInstaller:
 
 From the project root (with venv activated):
 
-    pyinstaller --onefile --name openomen openomen
+    pyinstaller openomen.spec
 
-If your entry file is different, replace openomen accordingly.
+The spec builds a single-file binary from the `openomen` entry script and
+pulls in the `openomen` package from src/ (pathex=['src']). The equivalent
+one-off command is:
+
+    pyinstaller --onefile --name openomen --paths src openomen
+
+Code layout:
+
+    openomen               entry script (also runnable directly from a checkout)
+    src/openomen/          the package; VERSION lives in src/openomen/__init__.py
+    src/openomen/core/     hardware access, returns data (shared with the GUI)
+    src/openomen/cli.py    argument parsing and text / --json output
 
 ------------------------------------------------------------
 5. OUTPUT
@@ -63,7 +74,7 @@ This is the standalone executable for Linux.
 6. PUBLISH ON GITHUB (what `openomen update` expects)
 ------------------------------------------------------------
 
-- Tag the release CLI_X.Y.Z (or vX.Y.Z / X.Y.Z), matching VERSION in the script.
+- Tag the release CLI_X.Y.Z (or vX.Y.Z / X.Y.Z), matching VERSION in src/openomen/__init__.py.
   The updater refuses a binary whose `--version` differs from the tag.
 - Upload the binary as an asset named exactly: openomen
 - Don't mark it as a pre-release; pre-releases and drafts are skipped.

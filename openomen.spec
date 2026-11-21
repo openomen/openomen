@@ -3,7 +3,7 @@
 
 a = Analysis(
     ['openomen'],
-    pathex=[],
+    pathex=['src'],  # the openomen package lives in src/openomen
     binaries=[],
     datas=[],
     hiddenimports=[],
