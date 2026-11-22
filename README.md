@@ -100,7 +100,7 @@ curl -fsSL https://raw.githubusercontent.com/openomen/openomen/main/install.sh |
 
 This will automatically install the latest **OpenOMEN Release Binary** to `/usr/local/bin`.
 
-## Debian Install
+### Debian Install
 
 For 64-bit (`amd64`) Debian/Ubuntu systems.
 
@@ -121,7 +121,7 @@ sudo apt update
 sudo apt install openomen
 ```
 
-## Manual Install
+### Manual Install
 1. Get **OpenOMEN's** [Latest Release](https://github.com/openomen/openomen/releases/latest).
 2. Download the release file (`openomen`).
 3. Move it to a directory on your `$PATH`, typically `/usr/local/bin`:
