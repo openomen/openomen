@@ -92,13 +92,34 @@ Use `openomen doctor` to test your computer's and kernel's capabilities.
 
 ## Installation
 
-### Automated Installation
+### Automated Global Installation
 On your terminal, run:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/openomen/openomen/main/install.sh | sudo bash
 ```
 
 This will automatically install the latest **OpenOMEN Release Binary** to `/usr/local/bin`.
+
+## Debian Install
+
+For 64-bit (`amd64`) Debian/Ubuntu systems.
+
+1. Add the Repository Public Key
+```bash
+sudo install -d -m 755 /etc/apt/keyrings
+curl -fsSL https://pratschi.github.io/apt/openomen-archive.asc | sudo gpg --dearmor -o /etc/apt/keyrings/openomen.gpg > /dev/null
+```
+
+2. Add the Repository
+```bash
+echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/openomen.gpg] https://openomen.github.io/apt stable main" | sudo tee /etc/apt/sources.list.d/openomen.list > /dev/null
+```
+
+3. Update APT and Install OpenOMEN
+```bash
+sudo apt update
+sudo apt install openomen
+```
 
 ## Manual Install
 1. Get **OpenOMEN's** [Latest Release](https://github.com/openomen/openomen/releases/latest).
@@ -112,8 +133,6 @@ This will automatically install the latest **OpenOMEN Release Binary** to `/usr/
    ```bash
    openomen --version
    ```
-
-You're now ready to run `openomen` from anywhere in your terminal.
 
 ---
 
