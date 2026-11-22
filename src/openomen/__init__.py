@@ -8,5 +8,5 @@ Package layout:
     openomen.cli    the `openomen` command line interface on top of core
 """
 
-VERSION = "0.5.0"
+VERSION = "0.5.1"
 APP_NAME = "OpenOMEN CLI"

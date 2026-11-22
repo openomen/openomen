@@ -26,13 +26,24 @@ def read_choices_file():
         return f.read().strip().split()
 
 
+def _choices_error(e):
+    """ A user-facing OpenOMENError for an OSError from read_choices_file(). """
+    if isinstance(e, FileNotFoundError):
+        return OpenOMENError("Error: This machine does not expose ACPI platform profiles "
+                             f"({PROFILE_CHOICES_PATH} is missing).",
+                             "Power profiles are not supported on this laptop or kernel. " + KERNEL_HINT)
+    if isinstance(e, PermissionError):
+        return OpenOMENError(f"Error: Permission denied reading {PROFILE_CHOICES_PATH}.")
+    return OpenOMENError(f"Error: Could not read {PROFILE_CHOICES_PATH}: {e.strerror or e}", KERNEL_HINT)
+
+
 def read_power_profile_choices():
     """ Return the list of ACPI profiles this machine supports, or None if unreadable (logged). """
     try:
         return read_choices_file()
     except IOError as e:
-        log.error(f"Error reading profile choices: {e}")
-        log.error(KERNEL_HINT)
+        for line in _choices_error(e).lines:
+            log.error(line)
         return None
 
 
@@ -40,7 +51,7 @@ def _choices_or_raise():
     try:
         return read_choices_file()
     except IOError as e:
-        raise OpenOMENError(f"Error reading profile choices: {e}", KERNEL_HINT)
+        raise _choices_error(e)
 
 
 def read_power_profile():
@@ -58,10 +69,24 @@ def read_power_profile():
 
 
 def get_power_status():
-    """ {"current": str|None, "choices": [..]|None, "combined": [..]} """
+    """
+    {"supported": bool, "current": str|None, "choices": [..]|None, "combined": [..]}
+    Reads quietly (nothing logged); "supported" is False when the machine exposes
+    no ACPI platform profiles at all. Callers decide how to report that.
+    """
+    try:
+        choices = read_choices_file()
+    except IOError:
+        choices = None
+    try:
+        with open(PROFILE_PATH, 'r') as f:
+            current = f.read().strip() or None
+    except IOError:
+        current = None
     return {
-        "current": read_power_profile(),
-        "choices": read_power_profile_choices(),
+        "supported": choices is not None or current is not None,
+        "current": current,
+        "choices": choices,
         "combined": list(COMBINED_PROFILES.keys()),
     }
 

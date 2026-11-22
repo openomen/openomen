@@ -1,0 +1,11 @@
+# Ignore build artifacts and Python cache files
+build/
+dist/
+__pycache__/
+venv/
+.venv/
+
+*.egg-info/
+
+# Ignore .git and .gitignore files
+.git/

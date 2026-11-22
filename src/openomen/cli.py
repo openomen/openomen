@@ -202,7 +202,8 @@ def print_gpu_stats(quiet_missing=False):
             print(f"  Temperature:    {raw['temperature']}°C")
             print(f"  Utilization:    {raw['utilization']}%")
             print(f"  VRAM:           {raw['vram_used']} / {raw['vram_total']} MiB")
-            print(f"  Power Draw:     {raw['power']} W\n")
+            print(f"  Power Draw:     {raw['power']} W")
+            print(f"  Frequency:      {raw['frequency']} MHz\n")
             continue
         if g["temperature_c"] is not None:
             print(f"  Temperature:    {g['temperature_c']:.1f}°C")
@@ -383,9 +384,9 @@ def cmd_power_apply(name):
 
 def cmd_power_list(as_json):
     try:
-        choices = power.read_choices_file()
-    except IOError as e:
-        print(f"Error: {e}", file=sys.stderr)
+        choices = power._choices_or_raise()
+    except OpenOMENError as e:
+        print_error(e)
         return False
     if as_json:
         print_json({"acpi": choices, "combined": list(power.COMBINED_PROFILES.keys()),
@@ -393,6 +394,24 @@ def cmd_power_list(as_json):
         return True
     print("ACPI profiles:    " + ", ".join(choices))
     print("Combined profiles: " + ", ".join(power.COMBINED_PROFILES.keys()))
+    return True
+
+
+def cmd_power_status(as_json):
+    status = power.get_power_status()
+    if as_json:
+        print_json(status)
+        return True
+    if not status["supported"]:
+        try:
+            power._choices_or_raise()
+        except OpenOMENError as e:
+            print_error(e)
+        return False
+    print(f"Power Profile:     {status['current'] or 'Unknown'}")
+    choices = status["choices"]
+    print(f"ACPI profiles:     {', '.join(choices) if choices else 'Unable to read'}")
+    print(f"Combined profiles: {', '.join(status['combined'])}")
     return True
 
 
@@ -539,6 +558,8 @@ Run 'openomen <command> -w' to watch in real-time.
     apply_parser.add_argument('profile', help='Combined profile name')
     power_list_parser = power_subparsers.add_parser('list', help='List available profiles')
     add_json(power_list_parser)
+    power_status_parser = power_subparsers.add_parser('status', help='Show the current power profile')
+    add_json(power_status_parser)
 
     # RGB command
     rgb_parser = subparsers.add_parser('rgb', help='Control keyboard RGB lighting')
@@ -618,6 +639,8 @@ def main():
             return 0 if cmd_power_apply(args.profile) else 1
         if args.power_command == 'list':
             return 0 if cmd_power_list(args.json) else 1
+        if args.power_command == 'status':
+            return 0 if cmd_power_status(args.json) else 1
 
     elif args.command == 'rgb':
         if not args.rgb_command:

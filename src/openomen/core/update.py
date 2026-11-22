@@ -1,6 +1,7 @@
 """ Self-updater: download the latest release binary from GitHub and install it. """
 
 import contextlib
+import glob
 import hashlib
 import json
 import os
@@ -8,11 +9,13 @@ import re
 import shutil
 import ssl
 import subprocess
+import sys
 import tempfile
 import urllib.error
 import urllib.request
 
 from .. import VERSION
+from .runtime import is_frozen
 
 
 def is_nixos():
@@ -178,7 +181,7 @@ def make_ssl_context():
 
 
 def parse_version(text):
-    """ Extract (major, minor, patch) from text like 'CLI_v0.5.0' or 'openomen 0.5.0'. """
+    """ Extract (major, minor, patch) from text like 'CLI_v0.5.1' or 'openomen 0.5.1'. """
     match = re.search(r'(\d+)\.(\d+)\.(\d+)', text or "")
     return tuple(int(x) for x in match.groups()) if match else None
 
@@ -328,18 +331,50 @@ def get_binary_version(path, runner_prefix=None, stderr_lines=None):
     Raises OSError / subprocess.TimeoutExpired like subprocess.run.
     """
     cmd = (runner_prefix or []) + [path]
-    result = subprocess.run(cmd + ['--version'], capture_output=True, text=True, timeout=10)
+    # When we are a PyInstaller onefile binary ourselves, our _PYI_* variables
+    # would make the child bootloader reuse *our* unpacked bundle, so the child
+    # reports this process's version instead of its own. Ask for a clean start.
+    env = dict(os.environ, PYINSTALLER_RESET_ENVIRONMENT="1")
+    result = subprocess.run(cmd + ['--version'], capture_output=True, text=True, timeout=10, env=env)
     version = parse_version(result.stdout)
     if version:
         return version
     first_stderr = result.stderr
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=10, env=env)
     match = re.search(r'V(\d+\.\d+\.\d+)', result.stdout)
     if match:
         return parse_version(match.group(1))
     if stderr_lines is not None:
         stderr_lines.extend(line for line in (first_stderr or result.stderr).strip().splitlines() if line.strip())
     return None
+
+
+def is_running_binary(path):
+    """ True when `path` is the PyInstaller binary this process is running from. """
+    if not is_frozen():
+        return False
+    try:
+        return os.path.samefile(path, sys.executable)
+    except OSError:
+        return False
+
+
+def get_installed_version(install_path):
+    """
+    Version of the installed openomen at install_path, as (version, error_lines).
+    If that is the binary we are running, VERSION is the answer without spawning
+    anything. version is None when it could not be determined; error_lines then
+    holds the reason (the child's stderr, or the exec error).
+    """
+    if is_running_binary(install_path):
+        return parse_version(VERSION), []
+    errors = []
+    try:
+        return get_binary_version(install_path, stderr_lines=errors), errors
+    except subprocess.TimeoutExpired:
+        return None, ["Timed out running the installed binary."]
+    except OSError as e:
+        return None, [f"Could not run the installed binary: {e}"]
 
 
 def install_binary(src_path, install_path, needs_sudo):
@@ -408,13 +443,13 @@ def update_openomen(force=False, verify=True, out=print):
             out(f"Latest Version: {format_version(expected_version)}")
 
             if os.path.exists(install_path):
-                try:
-                    current = get_binary_version(install_path)
-                except (OSError, subprocess.TimeoutExpired):
-                    current = None
-                    out("Current Version: Unable to run current binary")
+                current, check_errors = get_installed_version(install_path)
+                if current:
+                    out(f"Current Version: {format_version(current)}")
                 else:
-                    out(f"Current Version: {format_version(current) if current else 'Unable to detect version'}")
+                    out("Current Version: Unable to detect version")
+                    for line in check_errors[:5]:
+                        out(f"  {line}")
                 if current and current == expected_version:
                     out("\nYou already have the latest version! Use '-f' / '--force' to reinstall anyway.")
                     return True

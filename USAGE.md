@@ -58,6 +58,7 @@ You can run `openomen -v` or `openomen --version` to see your current Binary's v
 * `openomen power set <profile>` > Set an active ACPI Power Profile.
 * `openomen power apply <profile>` > Apply predefined profile templates.
 * `openomen power list` > Show available profiles.
+* `openomen power status` > Show the current power profile (supports `--json`).
 
 ## RGB Management
 `openomen rgb` is the main command for **RGB Management.**

@@ -77,7 +77,7 @@ def _query_nvidia(start_index):
         result = subprocess.run(
             [
                 "nvidia-smi",
-                "--query-gpu=name,temperature.gpu,utilization.gpu,memory.used,memory.total,power.draw",
+                "--query-gpu=name,temperature.gpu,utilization.gpu,memory.used,memory.total,power.draw,clocks.gr",
                 "--format=csv,noheader,nounits"
             ],
             capture_output=True, text=True, timeout=5
@@ -92,6 +92,7 @@ def _query_nvidia(start_index):
             continue
         gpu_name, temp, util, vram_used, vram_total = parts[:5]
         power = parts[5] if len(parts) > 5 else "N/A"
+        clock = parts[6] if len(parts) > 6 else "N/A"
         gpu = _new_gpu(start_index + len(gpus) + 1, "NVIDIA", gpu_name)
         gpu.update({
             "temperature_c": _number(temp),
@@ -99,9 +100,10 @@ def _query_nvidia(start_index):
             "vram_used_mib": _number(vram_used),
             "vram_total_mib": _number(vram_total),
             "power_w": _number(power),
+            "frequency_mhz": _number(clock),
         })
         gpu["_raw"] = {"temperature": temp, "utilization": util, "vram_used": vram_used,
-                       "vram_total": vram_total, "power": power}
+                       "vram_total": vram_total, "power": power, "frequency": clock}
         gpus.append(gpu)
     return gpus
 
