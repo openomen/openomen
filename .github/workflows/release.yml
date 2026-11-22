@@ -40,8 +40,9 @@ jobs:
         run: |
           ./dist/openomen --version
           ./dist/openomen --version | grep -q "${GITHUB_REF_NAME#CLI_}"
-          echo "Highest glibc needed:"
-          objdump -T dist/openomen | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -1
+          LIBPY=$(python -c "import sysconfig,os; print(os.path.join(sysconfig.get_config_var('LIBDIR'), sysconfig.get_config_var('LDLIBRARY')))")
+          echo "Highest glibc needed (libpython):"
+          objdump -T "$LIBPY" | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -1
 
       - name: Checksum
         run: |
