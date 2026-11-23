@@ -3,6 +3,12 @@ name: Update APT repository
 on:
   release:
     types: [published]
+  # Manual run from the Actions tab, e.g. to (re)publish an existing release
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish (e.g. CLI_0.5.1)"
+        required: true
 
 permissions:
   contents: read
@@ -10,15 +16,17 @@ permissions:
 jobs:
   update-apt:
     # Only with CLI_X.X.X tags
-    if: startsWith(github.event.release.tag_name, 'CLI_')
+    if: startsWith(inputs.tag || github.event.release.tag_name, 'CLI_')
     runs-on: ubuntu-22.04
+    env:
+      TAG: ${{ inputs.tag || github.event.release.tag_name }}
 
     steps:
       - name: Checkout website repository
         uses: actions/checkout@v5
         with:
-          repository: pratschi/openomen.github.io
-          ref: main
+          repository: openomen/openomen.github.io
+          ref: master
           token: ${{ secrets.PAGES_TOKEN }}
           path: pages
 
@@ -33,7 +41,6 @@ jobs:
       - name: Download release binary and build .deb
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.event.release.tag_name }}
         run: |
           set -euo pipefail
 
@@ -63,7 +70,6 @@ jobs:
       - name: Configure and update APT repository
         env:
           APT_SIGNING_FINGERPRINT: ${{ secrets.APT_SIGNING_FINGERPRINT }}
-          TAG: ${{ github.event.release.tag_name }}
         run: |
           set -euo pipefail
 
@@ -111,5 +117,5 @@ jobs:
             exit 0
           fi
 
-          git commit -m "Update APT repository for ${{ github.event.release.tag_name }}"
-          git push origin main
+          git commit -m "Update APT repository for $TAG"
+          git push origin master
