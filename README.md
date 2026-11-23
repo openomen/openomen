@@ -107,7 +107,7 @@ For 64-bit (`amd64`) Debian/Ubuntu systems.
 1. Add the Repository Public Key
 ```bash
 sudo install -d -m 755 /etc/apt/keyrings
-curl -fsSL https://pratschi.github.io/apt/openomen-archive.asc | sudo gpg --dearmor -o /etc/apt/keyrings/openomen.gpg > /dev/null
+curl -fsSL https://openomen.github.io/apt/openomen-archive.asc | sudo gpg --dearmor -o /etc/apt/keyrings/openomen.gpg > /dev/null
 ```
 
 2. Add the Repository
