@@ -403,6 +403,21 @@ def install_binary(src_path, install_path, needs_sudo):
                     os.unlink(staged)
 
 
+def is_dpkg_managed(path):
+    """Return True if dpkg owns this file."""
+    dpkg_query = shutil.which("dpkg-query")
+    if not dpkg_query:
+        return False
+
+    result = subprocess.run(
+        [dpkg_query, "-S", path],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.returncode == 0
+
+
 def update_openomen(force=False, verify=True, out=print):
     """
     Update OpenOMEN to the latest release binary.
@@ -414,6 +429,14 @@ def update_openomen(force=False, verify=True, out=print):
     tmp_path = None
     try:
         install_path = get_install_path()
+
+        if is_dpkg_managed(install_path):
+            out("OpenOMEN is managed by APT/dpkg; the self-updater will not replace it.")
+            out("Update it with:")
+            out("  sudo apt update")
+            out("  sudo apt install --only-upgrade openomen")
+            return False
+
         install_dir = os.path.dirname(install_path)
         needs_sudo = dir_needs_sudo(install_dir)
         ssl_context = make_ssl_context()

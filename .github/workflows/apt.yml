@@ -1,0 +1,121 @@
+name: Update APT repository
+
+on:
+  release:
+    types: [published]
+  # Manual run from the Actions tab, e.g. to (re)publish an existing release
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish (e.g. CLI_0.5.1)"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  update-apt:
+    # Only with CLI_X.X.X tags
+    if: startsWith(inputs.tag || github.event.release.tag_name, 'CLI_')
+    runs-on: ubuntu-22.04
+    env:
+      TAG: ${{ inputs.tag || github.event.release.tag_name }}
+
+    steps:
+      - name: Checkout website repository
+        uses: actions/checkout@v5
+        with:
+          repository: openomen/openomen.github.io
+          ref: master
+          token: ${{ secrets.PAGES_TOKEN }}
+          path: pages
+
+      - name: Install tools and import signing key
+        env:
+          APT_SIGNING_KEY: ${{ secrets.APT_SIGNING_KEY }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y reprepro gnupg
+          echo "$APT_SIGNING_KEY" | gpg --batch --import
+
+      - name: Download release binary and build .deb
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          VERSION="${TAG#CLI_}"
+          mkdir -p release package/DEBIAN package/usr/local/bin
+
+          gh release download "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern openomen \
+            --dir release
+
+          test -s release/openomen
+          install -m 755 release/openomen package/usr/local/bin/openomen
+
+          cat > package/DEBIAN/control <<EOF
+          Package: openomen
+          Version: $VERSION
+          Section: utils
+          Priority: optional
+          Architecture: amd64
+          Maintainer: OpenOMEN
+          Description: Unofficial driver and daemon for HP OMEN hardware on Linux.
+          EOF
+
+          dpkg-deb --build package "openomen_${VERSION}_amd64.deb"
+
+      - name: Configure and update APT repository
+        env:
+          APT_SIGNING_FINGERPRINT: ${{ secrets.APT_SIGNING_FINGERPRINT }}
+        run: |
+          set -euo pipefail
+
+          REPO="$GITHUB_WORKSPACE/pages/.aptrepo"
+          mkdir -p "$REPO/conf"
+
+          if [ ! -f "$REPO/conf/distributions" ]; then
+            cat > "$REPO/conf/distributions" <<EOF
+          Origin: OpenOMEN
+          Label: OpenOMEN
+          Suite: stable
+          Codename: stable
+          Architectures: amd64
+          Components: main
+          Description: OpenOMEN APT repository
+          SignWith: $APT_SIGNING_FINGERPRINT
+          EOF
+          fi
+
+          VERSION="${TAG#CLI_}"
+          reprepro -b "$REPO" includedeb stable \
+            "$GITHUB_WORKSPACE/openomen_${VERSION}_amd64.deb"
+
+          mkdir -p "$GITHUB_WORKSPACE/pages/apt"
+          rm -rf "$GITHUB_WORKSPACE/pages/apt/dists" \
+                 "$GITHUB_WORKSPACE/pages/apt/pool"
+
+          cp -a "$REPO/dists" "$REPO/pool" "$GITHUB_WORKSPACE/pages/apt/"
+
+          gpg --armor --export "$APT_SIGNING_FINGERPRINT" \
+            > "$GITHUB_WORKSPACE/pages/apt/openomen-archive.asc"
+
+          touch "$GITHUB_WORKSPACE/pages/apt/.nojekyll"
+
+      - name: Commit and push website update
+        working-directory: pages
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add .aptrepo apt
+
+          if git diff --cached --quiet; then
+            echo "No repository changes to publish."
+            exit 0
+          fi
+
+          git commit -m "Update APT repository for $TAG"
+          git push origin master
