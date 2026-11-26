@@ -430,11 +430,16 @@ def update_openomen(force=False, verify=True, out=print):
     try:
         install_path = get_install_path()
 
-        if is_dpkg_managed(install_path):
-            out("OpenOMEN is managed by APT/dpkg; the self-updater will not replace it.")
+        dpkg_managed = is_dpkg_managed(install_path)
+        if dpkg_managed and force:
+            out("OpenOMEN is managed by APT/dpkg.")
+            out("This forced update could break your APT installation!")
+        elif dpkg_managed:
+            out("OpenOMEN is managed by APT/dpkg.")
             out("Update it with:")
             out("  sudo apt update")
-            out("  sudo apt install --only-upgrade openomen")
+            out("  sudo apt upgrade openomen")
+            out("\nYou can force the update using the --force argument, but may break your APT installation!")
             return False
 
         install_dir = os.path.dirname(install_path)
